@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"/>
+<meta name="theme-color" content="#233043"/>
+<title>Clear the Way</title>
+<link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+<div id="app">
+
+  <!-- ======================= TOP HUD ======================= -->
+  <header id="hud">
+    <button id="btnPause" class="icon-btn" aria-label="Pause">
+      <span class="pause-bars"><i></i><i></i></span>
+    </button>
+    <div class="hud-pill" id="hudLevel">LEVEL 1</div>
+    <div class="hud-pill" id="hudMoves">MOVES 0 / 3</div>
+    <div class="hud-pill coin-pill"><span class="coin"></span><span id="hudCoins">0</span></div>
+  </header>
+
+  <!-- ======================= GAME AREA ======================= -->
+  <main id="stage">
+    <canvas id="game"></canvas>
+    <div id="toast" class="hidden"></div>
+    <div id="tutorialBox" class="hidden"></div>
+  </main>
+
+  <!-- ======================= BOTTOM TOOLBAR ======================= -->
+  <nav id="toolbar">
+    <button id="btnUndo" class="tool-btn" disabled>
+      <span class="t-ico">&#10554;</span><span class="t-label">UNDO</span>
+    </button>
+    <button id="btnHint" class="tool-btn">
+      <span class="t-ico">&#10022;</span><span class="t-label">HINT</span>
+      <span id="hintBadge" class="badge">3</span>
+    </button>
+    <button id="btnRestart" class="tool-btn">
+      <span class="t-ico">&#10561;</span><span class="t-label">RESTART</span>
+    </button>
+  </nav>
+
+  <!-- ======================= OVERLAY PANELS ======================= -->
+  <div id="overlay" class="hidden">
+
+    <div id="panelPause" class="panel hidden">
+      <h2>PAUSED</h2>
+      <button id="btnResume" class="panel-btn primary">RESUME</button>
+      <button id="btnPauseRestart" class="panel-btn">RESTART</button>
+      <button id="btnPauseSound" class="panel-btn">SOUND: ON</button>
+      <button id="btnPauseMenu" class="panel-btn">MAIN MENU</button>
+    </div>
+
+    <div id="panelComplete" class="panel hidden">
+      <h2 class="cheer">ROAD CLEARED!</h2>
+      <div id="starRow" class="stars"><span>&#9733;</span><span>&#9733;</span><span>&#9733;</span></div>
+      <div class="stats">
+        <div class="stat-line"><span>Moves</span><b id="statMoves">0</b></div>
+        <div class="stat-line"><span>Best</span><b id="statBest">–</b></div>
+        <div class="stat-line"><span>Coins earned</span><b id="statCoins">+0</b></div>
+      </div>
+      <button id="btnNext" class="panel-btn primary">NEXT LEVEL</button>
+      <button id="btnReplay" class="panel-btn">REPLAY</button>
+      <button id="btnCompleteMenu" class="panel-btn">MAIN MENU</button>
+    </div>
+
+    <div id="panelMenu" class="panel hidden">
+      <h1 class="logo">CLEAR<br/>THE WAY</h1>
+      <p class="tagline">Park the traffic. Save a life.</p>
+      <div id="levelGrid" class="level-grid"></div>
+      <div class="menu-row">
+        <button id="btnMenuSound" class="panel-btn small">SOUND: ON</button>
+        <button id="btnMenuTutorial" class="panel-btn small">TUTORIAL</button>
+      </div>
+    </div>
+
+    <div id="panelConfirm" class="panel hidden">
+      <h2 id="confirmText">Restart this level?</h2>
+      <button id="btnConfirmYes" class="panel-btn primary">YES</button>
+      <button id="btnConfirmNo" class="panel-btn">CANCEL</button>
+    </div>
+
+  </div>
+</div>
+<script src="game.js"></script>
+</body>
+</html>
