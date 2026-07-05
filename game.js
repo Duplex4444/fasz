@@ -850,12 +850,16 @@ class Renderer {
     this.ctx = canvas.getContext('2d');
     this.view = { ox: 0, oy: 0, cs: 32, w: 0, h: 0 };
     this.dashOffset = 0;
+    this.dpr = 1;
+    this.ground = null;       // offscreen cache of all static scenery
+    this.groundDirty = true;  // rebuilt lazily on the next frame
     this.resize();
   }
 
   resize() {
     const rect = this.canvas.parentElement.getBoundingClientRect();
     const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    this.dpr = dpr;
     this.canvas.width = Math.max(1, Math.round(rect.width * dpr));
     this.canvas.height = Math.max(1, Math.round(rect.height * dpr));
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -867,6 +871,7 @@ class Renderer {
       oy: Math.floor((h - cs * ROWS) / 2),
       w, h,
     };
+    this.groundDirty = true;
   }
 
   /* Pixel pose (center + angle) of a vehicle state. */
@@ -882,21 +887,24 @@ class Renderer {
     return { x: ox + (c + 0.5) * cs, y: oy + (r + 0.5) * cs };
   }
 
-  rr(x, y, w, h, r) {
-    const ctx = this.ctx;
+  rrOn(c, x, y, w, h, r) {
     r = Math.min(r, w / 2, h / 2);
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + h, r);
-    ctx.arcTo(x + w, y + h, x, y + h, r);
-    ctx.arcTo(x, y + h, x, y, r);
-    ctx.arcTo(x, y, x + w, y, r);
-    ctx.closePath();
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
   }
 
+  rr(x, y, w, h, r) { this.rrOn(this.ctx, x, y, w, h, r); }
+
   draw(t, dt) {
-    const g = this.game, ctx = this.ctx, { ox, oy, cs, w, h } = this.view;
+    const g = this.game, ctx = this.ctx, { w, h } = this.view;
     this.dashOffset -= dt * 26;
+
+    if ((this.groundDirty || !this.ground) && g.board) this.renderGround();
 
     ctx.clearRect(0, 0, w, h);
 
@@ -907,99 +915,289 @@ class Renderer {
       ctx.translate((Math.random() - 0.5) * m * 2, (Math.random() - 0.5) * m * 2);
     }
 
-    this.drawGround(t);
-    this.drawSpaces(t);
+    if (this.ground) {
+      ctx.drawImage(this.ground, 0, 0, this.ground.width, this.ground.height, 0, 0, w, h);
+    }
+    this.drawRouteFx(t);
+    this.drawSpaceHighlights(t);
     this.drawExit(t);
+    this.drawDynamicDecor(t);
     this.drawHintPath(t);
     this.drawDragPreview(t);
     this.drawVehicles(t);
     this.drawGhost(t);
     g.particles.draw(ctx);
+    this.drawVignette();
     if (DEBUG) this.drawDebug();
 
     ctx.restore();
   }
 
-  /* ---- ground: grass, trees, pavement, road, markings, route ---- */
-  drawGround(t) {
-    const g = this.game, ctx = this.ctx, { ox, oy, cs, w, h } = this.view;
-    const b = g.board;
+  /* ---- static scenery cache: grass, road, sidewalks, bays, buildings ---- */
+  renderGround() {
+    const g = this.game, b = g.board;
+    const { ox, oy, cs, w, h } = this.view;
+    const dpr = this.dpr;
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(w * dpr));
+    cv.height = Math.max(1, Math.round(h * dpr));
+    const c = cv.getContext('2d');
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const rand = mulberry32(g.levelDef().id * 911 + 17);
 
-    // Grass base fills the whole canvas.
-    ctx.fillStyle = '#79c14e';
-    ctx.fillRect(0, 0, w, h);
-    // Checkerboard grass tint.
-    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+    // Grass: warm top-lit gradient + soft checker + mottled patches.
+    const lawn = c.createLinearGradient(0, 0, 0, h);
+    lawn.addColorStop(0, '#8ed162');
+    lawn.addColorStop(1, '#6fbc48');
+    c.fillStyle = lawn;
+    c.fillRect(0, 0, w, h);
+    c.fillStyle = 'rgba(255,255,255,0.055)';
     for (let r = -2; r < ROWS + 2; r++) {
-      for (let c = -2; c < COLS + 2; c++) {
-        if ((r + c) % 2 === 0) ctx.fillRect(ox + c * cs, oy + r * cs, cs, cs);
+      for (let cc = -2; cc < COLS + 2; cc++) {
+        if ((r + cc) % 2 === 0) c.fillRect(ox + cc * cs, oy + r * cs, cs, cs);
+      }
+    }
+    for (let i = 0; i < 26; i++) {
+      c.fillStyle = rand() < 0.5 ? 'rgba(255,255,255,0.05)' : 'rgba(30,80,20,0.05)';
+      c.beginPath();
+      c.ellipse(rand() * w, rand() * h, cs * (0.6 + rand()), cs * (0.35 + rand() * 0.6), rand() * 3, 0, Math.PI * 2);
+      c.fill();
+    }
+
+    // Sidewalk / apron cells: concrete tiles with seams.
+    for (let r = 0; r < ROWS; r++) {
+      for (let cc = 0; cc < COLS; cc++) {
+        if (b.type[r][cc] !== TILE.PAVE) continue;
+        const x = ox + cc * cs, y = oy + r * cs;
+        const pv = c.createLinearGradient(x, y, x, y + cs);
+        pv.addColorStop(0, '#d5dbe2');
+        pv.addColorStop(1, '#c3cad3');
+        c.fillStyle = pv;
+        c.fillRect(x, y, cs, cs);
+        c.strokeStyle = 'rgba(90,100,115,0.16)';
+        c.lineWidth = 1;
+        c.strokeRect(x + 0.5, y + 0.5, cs - 1, cs - 1);
       }
     }
 
-    // Pavement cells (parking aprons).
+    // Road: asphalt with subtle speckle texture.
     for (let r = 0; r < ROWS; r++) {
-      for (let c = 0; c < COLS; c++) {
-        if (b.type[r][c] === TILE.PAVE) {
-          ctx.fillStyle = '#b9c0ca';
-          ctx.fillRect(ox + c * cs, oy + r * cs, cs, cs);
+      for (let cc = 0; cc < COLS; cc++) {
+        if (b.type[r][cc] !== TILE.ROAD) continue;
+        const x = ox + cc * cs, y = oy + r * cs;
+        c.fillStyle = '#51565f';
+        c.fillRect(x, y, cs, cs);
+        for (let i = 0; i < 6; i++) {
+          c.fillStyle = rand() < 0.5 ? 'rgba(255,255,255,0.045)' : 'rgba(0,0,0,0.07)';
+          c.fillRect(x + rand() * (cs - 2), y + rand() * (cs - 2), 2, 2);
         }
       }
     }
 
-    // Road cells with curb edging.
+    // Curbs: light stone with a darker seam toward the road.
+    const curb = Math.max(2.5, cs * 0.1);
+    const seam = Math.max(1, cs * 0.028);
     for (let r = 0; r < ROWS; r++) {
-      for (let c = 0; c < COLS; c++) {
-        if (b.type[r][c] !== TILE.ROAD) continue;
-        ctx.fillStyle = '#4c515c';
-        ctx.fillRect(ox + c * cs, oy + r * cs, cs, cs);
-      }
-    }
-    // Curbs: light edge where road/pavement meets grass.
-    ctx.fillStyle = '#dfe3e8';
-    const curb = Math.max(2, cs * 0.09);
-    for (let r = 0; r < ROWS; r++) {
-      for (let c = 0; c < COLS; c++) {
-        if (!b.drivable[r][c]) continue;
-        const x = ox + c * cs, y = oy + r * cs;
-        if (c === 0 || !b.drivable[r][c - 1]) ctx.fillRect(x, y, curb, cs);
-        if (c === COLS - 1 || !b.drivable[r][c + 1]) ctx.fillRect(x + cs - curb, y, curb, cs);
-        if (r === 0 || !b.drivable[r - 1][c]) ctx.fillRect(x, y, cs, curb);
-        if (r === ROWS - 1 || !b.drivable[r + 1][c]) ctx.fillRect(x, y + cs - curb, cs, curb);
+      for (let cc = 0; cc < COLS; cc++) {
+        if (!b.drivable[r][cc]) continue;
+        const x = ox + cc * cs, y = oy + r * cs;
+        if (cc === 0 || !b.drivable[r][cc - 1]) {
+          c.fillStyle = '#e9edf1'; c.fillRect(x, y, curb, cs);
+          c.fillStyle = 'rgba(35,45,60,0.28)'; c.fillRect(x + curb, y, seam, cs);
+        }
+        if (cc === COLS - 1 || !b.drivable[r][cc + 1]) {
+          c.fillStyle = '#e9edf1'; c.fillRect(x + cs - curb, y, curb, cs);
+          c.fillStyle = 'rgba(35,45,60,0.28)'; c.fillRect(x + cs - curb - seam, y, seam, cs);
+        }
+        if (r === 0 || !b.drivable[r - 1][cc]) {
+          c.fillStyle = '#e9edf1'; c.fillRect(x, y, cs, curb);
+          c.fillStyle = 'rgba(35,45,60,0.28)'; c.fillRect(x, y + curb, cs, seam);
+        }
+        if (r === ROWS - 1 || !b.drivable[r + 1][cc]) {
+          c.fillStyle = '#e9edf1'; c.fillRect(x, y + cs - curb, cs, curb);
+          c.fillStyle = 'rgba(35,45,60,0.28)'; c.fillRect(x, y + cs - curb - seam, cs, seam);
+        }
       }
     }
 
-    // Lane markings on the two road lanes beside the emergency lane.
-    ctx.strokeStyle = 'rgba(244,246,248,0.5)';
-    ctx.lineWidth = Math.max(2, cs * 0.055);
-    ctx.setLineDash([cs * 0.42, cs * 0.42]);
-    for (const c of [2.5, 4.5]) {
-      let runStart = null;
+    // Dashed lane separators beside the emergency lane.
+    c.strokeStyle = 'rgba(244,246,248,0.55)';
+    c.lineWidth = Math.max(2, cs * 0.055);
+    c.setLineDash([cs * 0.45, cs * 0.4]);
+    for (const lx of [3, 4]) {
+      let run = null;
       for (let r = 0; r <= ROWS; r++) {
-        const roadHere = r < ROWS && b.type[r][Math.floor(c)] === TILE.ROAD && b.type[r][Math.ceil(c)] === TILE.ROAD;
-        if (roadHere && runStart === null) runStart = r;
-        if ((!roadHere || r === ROWS) && runStart !== null) {
-          ctx.beginPath();
-          ctx.moveTo(ox + c * cs + cs * 0.5 - cs * 0.5 + cs * 0.5, 0); // noop guard
-          ctx.beginPath();
-          ctx.moveTo(ox + (Math.floor(c) + 1) * cs, oy + runStart * cs + 4);
-          ctx.lineTo(ox + (Math.floor(c) + 1) * cs, oy + r * cs - 4);
-          ctx.stroke();
-          runStart = null;
+        const on = r < ROWS && b.type[r][lx - 1] === TILE.ROAD && b.type[r][lx] === TILE.ROAD;
+        if (on && run === null) run = r;
+        if ((!on || r === ROWS) && run !== null) {
+          c.beginPath();
+          c.moveTo(ox + lx * cs, oy + run * cs + 3);
+          c.lineTo(ox + lx * cs, oy + r * cs - 3);
+          c.stroke();
+          run = null;
         }
       }
     }
-    ctx.setLineDash([]);
+    c.setLineDash([]);
 
-    // Emergency lane tint + upward chevrons.
-    for (const { r, c } of b.route) {
-      ctx.fillStyle = 'rgba(255,120,90,0.10)';
-      ctx.fillRect(ox + c * cs, oy + r * cs, cs, cs);
+    // Emergency lane: warm tint + red dashed edge lines.
+    for (const p of b.route) {
+      c.fillStyle = 'rgba(255,110,80,0.10)';
+      c.fillRect(ox + p.c * cs, oy + p.r * cs, cs, cs);
     }
+    if (b.route.length) {
+      const col = b.route[0].c;
+      const rows = b.route.map(p => p.r);
+      const r0 = Math.min(...rows), r1 = Math.max(...rows);
+      c.strokeStyle = 'rgba(255,96,70,0.5)';
+      c.lineWidth = Math.max(2, cs * 0.05);
+      c.setLineDash([cs * 0.3, cs * 0.24]);
+      for (const x of [ox + col * cs + cs * 0.07, ox + (col + 1) * cs - cs * 0.07]) {
+        c.beginPath();
+        c.moveTo(x, oy + r0 * cs);
+        c.lineTo(x, oy + (r1 + 1) * cs);
+        c.stroke();
+      }
+      c.setLineDash([]);
+    }
+
+    // A couple of manhole covers on the outer lanes.
+    const spaceCellSet = new Set();
+    for (const sp of g.spaces) for (const [r, cc] of spaceCells(sp)) spaceCellSet.add(r + ',' + cc);
+    let holes = 0;
+    for (let tries = 0; tries < 30 && holes < 2; tries++) {
+      const r = 1 + Math.floor(rand() * (ROWS - 2));
+      const cc = rand() < 0.5 ? 2 : 4;
+      if (b.type[r][cc] !== TILE.ROAD) continue;
+      if (b.routeSet.has(r + ',' + cc) || spaceCellSet.has(r + ',' + cc)) continue;
+      const x = ox + (cc + 0.5) * cs, y = oy + (r + 0.5) * cs;
+      c.fillStyle = '#3e434c';
+      c.beginPath(); c.arc(x, y, cs * 0.2, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = 'rgba(255,255,255,0.14)';
+      c.lineWidth = 2;
+      c.beginPath(); c.arc(x, y, cs * 0.2, 0, Math.PI * 2); c.stroke();
+      c.beginPath(); c.arc(x, y, cs * 0.11, 0, Math.PI * 2); c.stroke();
+      holes++;
+    }
+
+    // Parking bays: tinted slab, painted white outline, big P.
+    for (const sp of g.spaces) {
+      const cells = spaceCells(sp);
+      const minR = Math.min(...cells.map(p => p[0])), maxR = Math.max(...cells.map(p => p[0]));
+      const minC = Math.min(...cells.map(p => p[1])), maxC = Math.max(...cells.map(p => p[1]));
+      const x = ox + minC * cs + cs * 0.08, y = oy + minR * cs + cs * 0.08;
+      const wd = (maxC - minC + 1) * cs - cs * 0.16, ht = (maxR - minR + 1) * cs - cs * 0.16;
+      c.fillStyle = 'rgba(70,90,120,0.10)';
+      this.rrOn(c, x, y, wd, ht, cs * 0.14); c.fill();
+      c.strokeStyle = 'rgba(255,255,255,0.85)';
+      c.lineWidth = Math.max(2, cs * 0.065);
+      this.rrOn(c, x, y, wd, ht, cs * 0.14); c.stroke();
+      c.fillStyle = 'rgba(255,255,255,0.75)';
+      c.font = `900 ${Math.round(cs * 0.52)}px "Trebuchet MS", sans-serif`;
+      c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText('P', x + wd / 2, y + ht / 2 + 1);
+    }
+
+    // Picket fences along the top and bottom grass strips.
+    for (const r of [0, ROWS - 1]) {
+      for (let cc = 0; cc < COLS; cc++) {
+        if (b.drivable[r][cc]) continue;
+        this.paintFence(c, ox + cc * cs, oy + r * cs + cs * 0.34, cs);
+      }
+    }
+
+    // Static decorations: houses, hydrants, rocks, flowers.
+    for (const d of g.decor) {
+      const x = ox + d.x * cs, y = oy + d.y * cs, s = d.s * cs;
+      if (d.kind === 'house') this.paintHouse(c, x, y, s, d.seed);
+      else if (d.kind === 'hydrant') this.paintHydrant(c, x, y, s);
+      else if (d.kind === 'rock') this.paintRock(c, x, y, s, d.seed);
+      else if (d.kind === 'flower') this.paintFlower(c, x, y, s, d.seed);
+    }
+
+    this.ground = cv;
+    this.groundDirty = false;
+  }
+
+  paintFence(c, x, y, cs) {
+    c.fillStyle = 'rgba(20,30,45,0.10)';
+    c.fillRect(x + cs * 0.04, y + cs * 0.2, cs * 0.92, cs * 0.06);
+    c.fillStyle = '#efe4c8';
+    c.fillRect(x, y + cs * 0.08, cs, cs * 0.05);
+    c.fillRect(x, y + cs * 0.2, cs, cs * 0.05);
+    c.fillStyle = '#f7efdb';
+    for (let i = 0; i < 4; i++) {
+      const px = x + cs * (0.06 + i * 0.27);
+      this.rrOn(c, px, y, cs * 0.08, cs * 0.32, cs * 0.03);
+      c.fill();
+    }
+  }
+
+  paintHouse(c, x, y, s, seed) {
+    const palettes = [['#e2694f', '#c94f38'], ['#5f8fd0', '#4674b4'],
+                      ['#e8b04c', '#cc9236'], ['#7fb069', '#639152']];
+    const [roofA, roofB] = palettes[Math.floor(seed * palettes.length) % palettes.length];
+    c.save();
+    c.translate(x, y);
+    c.rotate((seed - 0.5) * 0.12);
+    c.fillStyle = 'rgba(20,30,45,0.18)';
+    this.rrOn(c, -s * 0.44, -s * 0.32, s, s * 0.84, s * 0.1); c.fill();
+    c.fillStyle = '#f0e6d4';
+    this.rrOn(c, -s * 0.5, -s * 0.42, s, s * 0.84, s * 0.08); c.fill();
+    const gr = c.createLinearGradient(0, -s * 0.36, 0, s * 0.36);
+    gr.addColorStop(0, roofA); gr.addColorStop(1, roofB);
+    c.fillStyle = gr;
+    this.rrOn(c, -s * 0.44, -s * 0.36, s * 0.88, s * 0.72, s * 0.07); c.fill();
+    c.strokeStyle = 'rgba(0,0,0,0.18)';
+    c.lineWidth = Math.max(1, s * 0.03);
+    this.rrOn(c, -s * 0.44, -s * 0.36, s * 0.88, s * 0.72, s * 0.07); c.stroke();
+    c.strokeStyle = 'rgba(255,255,255,0.4)';
+    c.beginPath(); c.moveTo(-s * 0.36, 0); c.lineTo(s * 0.36, 0); c.stroke();
+    c.fillStyle = '#b0492f';
+    this.rrOn(c, s * 0.12, -s * 0.28, s * 0.16, s * 0.16, s * 0.03); c.fill();
+    c.restore();
+  }
+
+  paintHydrant(c, x, y, s) {
+    c.fillStyle = 'rgba(20,30,45,0.2)';
+    c.beginPath(); c.ellipse(x + s * 0.12, y + s * 0.16, s * 0.5, s * 0.32, 0, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#d8402f';
+    c.beginPath(); c.arc(x, y, s * 0.42, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#f26a52';
+    c.beginPath(); c.arc(x - s * 0.1, y - s * 0.12, s * 0.24, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#ffd75e';
+    c.beginPath(); c.arc(x, y, s * 0.1, 0, Math.PI * 2); c.fill();
+  }
+
+  paintRock(c, x, y, s, seed) {
+    c.fillStyle = 'rgba(20,30,45,0.15)';
+    c.beginPath(); c.ellipse(x + s * 0.1, y + s * 0.14, s, s * 0.7, 0, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#a8b0ba';
+    c.beginPath(); c.ellipse(x, y, s, s * 0.75, seed, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#c2c9d2';
+    c.beginPath(); c.ellipse(x - s * 0.2, y - s * 0.18, s * 0.55, s * 0.4, seed, 0, Math.PI * 2); c.fill();
+  }
+
+  paintFlower(c, x, y, s, seed) {
+    c.fillStyle = seed > 0.5 ? '#ff9db0' : '#ffe08a';
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * Math.PI * 2 + seed * 6;
+      c.beginPath();
+      c.arc(x + Math.cos(a) * s * 0.3, y + Math.sin(a) * s * 0.3, s * 0.2, 0, Math.PI * 2);
+      c.fill();
+    }
+    c.fillStyle = '#ffffff';
+    c.beginPath(); c.arc(x, y, s * 0.16, 0, Math.PI * 2); c.fill();
+  }
+
+  /* ---- per-frame dynamic layers over the cached ground ---- */
+  drawRouteFx(t) {
+    const g = this.game, ctx = this.ctx, { ox, oy, cs } = this.view;
     const crawl = (t * 0.018) % (cs * 2);
-    ctx.strokeStyle = 'rgba(255,255,255,0.30)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.32)';
     ctx.lineWidth = Math.max(2, cs * 0.07);
     ctx.lineCap = 'round';
-    for (const { r, c } of b.route) {
+    for (const { r, c } of g.board.route) {
       if (r % 2 !== 0) continue;
       const cx = ox + (c + 0.5) * cs;
       const cy = oy + (r + 0.62) * cs - crawl * 0.5;
@@ -1011,81 +1209,88 @@ class Renderer {
       ctx.stroke();
     }
     ctx.lineCap = 'butt';
-
     // Tutorial route highlight pulse.
     if (g.routeGlowUntil > t) {
       const a = 0.16 + 0.12 * Math.sin(t * 0.012);
       ctx.fillStyle = `rgba(255,90,70,${a})`;
-      for (const { r, c } of b.route) ctx.fillRect(ox + c * cs, oy + r * cs, cs, cs);
+      for (const { r, c } of g.board.route) ctx.fillRect(ox + c * cs, oy + r * cs, cs, cs);
     }
+  }
 
-    // Trees / bushes / flowers on grass (deterministic per level, gentle sway).
+  drawDynamicDecor(t) {
+    const g = this.game, ctx = this.ctx, { ox, oy, cs } = this.view;
     for (const d of g.decor) {
-      const x = ox + d.x * cs, y = oy + d.y * cs;
+      if (d.kind !== 'tree' && d.kind !== 'bush') continue;
+      const x = ox + d.x * cs, y = oy + d.y * cs, s = d.s * cs;
       const sway = Math.sin(t * 0.0011 + d.seed * 9) * cs * 0.03;
       if (d.kind === 'tree') {
-        ctx.fillStyle = 'rgba(0,0,0,0.16)';
-        ctx.beginPath(); ctx.ellipse(x + cs * 0.06, y + cs * 0.1, d.s * 0.95, d.s * 0.6, 0, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#3e8f36';
-        ctx.beginPath(); ctx.arc(x + sway, y, d.s, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#54a844';
-        ctx.beginPath(); ctx.arc(x + sway - d.s * 0.25, y - d.s * 0.28, d.s * 0.62, 0, Math.PI * 2); ctx.fill();
-      } else if (d.kind === 'bush') {
+        ctx.fillStyle = 'rgba(20,30,45,0.16)';
+        ctx.beginPath(); ctx.ellipse(x + s * 0.18, y + s * 0.26, s * 1.02, s * 0.68, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#377f2f';
+        ctx.beginPath(); ctx.arc(x + sway, y, s, 0, Math.PI * 2); ctx.fill();
         ctx.fillStyle = '#4d9c3f';
-        ctx.beginPath(); ctx.arc(x + sway * 0.5, y, d.s, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(x + sway - s * 0.18, y - s * 0.2, s * 0.78, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#66b551';
+        ctx.beginPath(); ctx.arc(x + sway - s * 0.3, y - s * 0.32, s * 0.42, 0, Math.PI * 2); ctx.fill();
       } else {
-        ctx.fillStyle = d.seed > 0.5 ? '#ffe08a' : '#ff9db0';
-        ctx.beginPath(); ctx.arc(x, y, Math.max(2, cs * 0.06), 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(20,30,45,0.14)';
+        ctx.beginPath(); ctx.ellipse(x + s * 0.12, y + s * 0.18, s * 1.05, s * 0.7, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#4d9c3f';
+        ctx.beginPath(); ctx.arc(x + sway * 0.5, y, s, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#63af4e';
+        ctx.beginPath(); ctx.arc(x + sway * 0.5 - s * 0.25, y - s * 0.25, s * 0.55, 0, Math.PI * 2); ctx.fill();
       }
     }
   }
 
-  /* ---- parking spaces ---- */
-  drawSpaces(t) {
+  drawVignette() {
+    const ctx = this.ctx, { w, h } = this.view;
+    const vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.5, w / 2, h / 2, Math.max(w, h) * 0.78);
+    vg.addColorStop(0, 'rgba(10,20,35,0)');
+    vg.addColorStop(1, 'rgba(10,20,35,0.24)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  /* ---- parking space highlight overlays (base bays live in the cache) ---- */
+  drawSpaceHighlights(t) {
     const g = this.game, ctx = this.ctx, { ox, oy, cs } = this.view;
     for (const sp of g.spaces) {
-      const cells = spaceCells(sp);
-      const minR = Math.min(...cells.map(c => c[0])), maxR = Math.max(...cells.map(c => c[0]));
-      const minC = Math.min(...cells.map(c => c[1])), maxC = Math.max(...cells.map(c => c[1]));
-      const x = ox + minC * cs + cs * 0.09, y = oy + minR * cs + cs * 0.09;
-      const wd = (maxC - minC + 1) * cs - cs * 0.18, ht = (maxR - minR + 1) * cs - cs * 0.18;
-
       const isValid = g.selection && g.selection.targets.has(sp.id);
       const isHint = g.hintFx && g.hintFx.spaceId === sp.id && g.hintFx.until > t;
       const flash = g.flashFx && g.flashFx.spaceId === sp.id && g.flashFx.until > t;
+      if (!isValid && !isHint && !flash) continue;
 
-      // Base slab.
-      ctx.fillStyle = 'rgba(255,255,255,0.10)';
-      this.rr(x, y, wd, ht, cs * 0.16); ctx.fill();
+      const cells = spaceCells(sp);
+      const minR = Math.min(...cells.map(p => p[0])), maxR = Math.max(...cells.map(p => p[0]));
+      const minC = Math.min(...cells.map(p => p[1])), maxC = Math.max(...cells.map(p => p[1]));
+      const x = ox + minC * cs + cs * 0.08, y = oy + minR * cs + cs * 0.08;
+      const wd = (maxC - minC + 1) * cs - cs * 0.16, ht = (maxR - minR + 1) * cs - cs * 0.16;
 
-      if (isValid) {
-        const pulse = 0.24 + 0.1 * Math.sin(t * 0.008);
-        ctx.fillStyle = `rgba(46,204,113,${pulse})`;
-        this.rr(x, y, wd, ht, cs * 0.16); ctx.fill();
-      }
-      if (isHint) {
-        const pulse = 0.25 + 0.18 * Math.sin(t * 0.012);
-        ctx.fillStyle = `rgba(255,201,60,${pulse})`;
-        this.rr(x, y, wd, ht, cs * 0.16); ctx.fill();
-      }
+      let fill, stroke, glow;
       if (flash) {
-        ctx.fillStyle = 'rgba(231,60,50,0.45)';
-        this.rr(x, y, wd, ht, cs * 0.16); ctx.fill();
+        fill = 'rgba(231,60,50,0.42)'; stroke = '#ff5347'; glow = 'rgba(255,80,60,0.9)';
+      } else if (isValid) {
+        fill = `rgba(46,204,113,${0.26 + 0.1 * Math.sin(t * 0.008)})`;
+        stroke = '#2ecc71'; glow = 'rgba(46,220,120,0.9)';
+      } else {
+        fill = `rgba(255,201,60,${0.26 + 0.16 * Math.sin(t * 0.012)})`;
+        stroke = '#ffc93c'; glow = 'rgba(255,201,60,0.9)';
       }
 
-      ctx.lineWidth = isValid || isHint ? Math.max(3, cs * 0.09) : Math.max(2, cs * 0.06);
-      ctx.strokeStyle = flash ? '#e73c32'
-        : isValid ? '#2ecc71'
-        : isHint ? '#ffc93c'
-        : 'rgba(255,255,255,0.65)';
-      ctx.setLineDash(isValid || isHint ? [] : [cs * 0.22, cs * 0.16]);
-      this.rr(x, y, wd, ht, cs * 0.16); ctx.stroke();
-      ctx.setLineDash([]);
+      ctx.fillStyle = fill;
+      this.rr(x, y, wd, ht, cs * 0.14); ctx.fill();
+      ctx.save();
+      ctx.shadowColor = glow;
+      ctx.shadowBlur = cs * 0.35;
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = Math.max(3, cs * 0.09);
+      this.rr(x, y, wd, ht, cs * 0.14); ctx.stroke();
+      ctx.restore();
 
-      // "P" label when free.
       if (!sp.occupiedBy) {
-        ctx.fillStyle = isValid ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)';
-        ctx.font = `900 ${Math.round(cs * 0.5)}px "Trebuchet MS", sans-serif`;
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.font = `900 ${Math.round(cs * 0.52)}px "Trebuchet MS", sans-serif`;
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         ctx.fillText('P', x + wd / 2, y + ht / 2 + 1);
       }
@@ -1100,28 +1305,45 @@ class Renderer {
     const cx = ox + (topRoute.c + 0.5) * cs;
     const y0 = oy + topRoute.r * cs;
 
-    // Glowing gradient strip.
-    const grad = ctx.createLinearGradient(0, y0, 0, y0 + cs * 1.4);
-    const glow = 0.35 + 0.15 * Math.sin(t * 0.005);
-    grad.addColorStop(0, `rgba(120,255,170,${glow})`);
-    grad.addColorStop(1, 'rgba(120,255,170,0)');
+    // Glowing green gradient strip.
+    const grad = ctx.createLinearGradient(0, y0, 0, y0 + cs * 1.5);
+    const glow = 0.4 + 0.18 * Math.sin(t * 0.005);
+    grad.addColorStop(0, `rgba(110,255,165,${glow})`);
+    grad.addColorStop(1, 'rgba(110,255,165,0)');
     ctx.fillStyle = grad;
-    ctx.fillRect(ox + (topRoute.c - 1) * cs, y0, cs * 3, cs * 1.4);
+    ctx.fillRect(ox + (topRoute.c - 1) * cs, y0, cs * 3, cs * 1.5);
 
-    // Big glowing arrow.
-    ctx.strokeStyle = `rgba(255,255,255,${0.75 + 0.25 * Math.sin(t * 0.006)})`;
-    ctx.lineWidth = Math.max(3, cs * 0.12);
+    // Big glowing green arrow.
+    ctx.save();
+    ctx.shadowColor = 'rgba(110,255,165,0.95)';
+    ctx.shadowBlur = cs * 0.4;
+    ctx.strokeStyle = `rgba(170,255,200,${0.8 + 0.2 * Math.sin(t * 0.006)})`;
+    ctx.lineWidth = Math.max(3, cs * 0.13);
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     ctx.beginPath();
     ctx.moveTo(cx, y0 + cs * 0.95);
     ctx.lineTo(cx, y0 + cs * 0.22);
-    ctx.moveTo(cx - cs * 0.26, y0 + cs * 0.5);
+    ctx.moveTo(cx - cs * 0.27, y0 + cs * 0.52);
     ctx.lineTo(cx, y0 + cs * 0.22);
-    ctx.lineTo(cx + cs * 0.26, y0 + cs * 0.5);
+    ctx.lineTo(cx + cs * 0.27, y0 + cs * 0.52);
     ctx.stroke();
+    // Two small rising chevrons beside the arrow.
+    const rise = (t * 0.03) % (cs * 0.8);
+    ctx.lineWidth = Math.max(2, cs * 0.07);
+    ctx.strokeStyle = `rgba(170,255,200,${0.5 - rise / (cs * 2)})`;
+    for (const sx of [-1, 1]) {
+      const ax = cx + sx * cs * 0.72;
+      const ay = y0 + cs * 0.8 - rise;
+      ctx.beginPath();
+      ctx.moveTo(ax - cs * 0.12, ay);
+      ctx.lineTo(ax, ay - cs * 0.14);
+      ctx.lineTo(ax + cs * 0.12, ay);
+      ctx.stroke();
+    }
+    ctx.restore();
     ctx.lineCap = 'butt';
 
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillStyle = 'rgba(230,255,240,0.92)';
     ctx.font = `900 ${Math.round(cs * 0.32)}px "Trebuchet MS", sans-serif`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     ctx.fillText('EXIT', cx, y0 + cs * 1.02);
@@ -1188,73 +1410,123 @@ class Renderer {
 
   drawVehicleBody(veh, pose, { selected = false, hinted = false, ghost = false, t = 0 } = {}) {
     const ctx = this.ctx, { cs } = this.view;
-    const L = veh.len * cs - cs * 0.22;
-    const W = cs * 0.78;
+    const L = veh.len * cs - cs * 0.2;
+    const W = cs * 0.8;
     let scale = 1;
-    if (selected) scale = 1.04;
+    if (selected) scale = 1.05;
     if (hinted) scale = 1 + 0.035 * (0.5 + 0.5 * Math.sin(t * 0.01));
-    if (veh.bounceT > 0) scale += 0.05 * Math.sin((1 - veh.bounceT) * Math.PI * 3) * veh.bounceT;
+    if (veh.bounceT > 0) scale += 0.06 * Math.sin((1 - veh.bounceT) * Math.PI * 3) * veh.bounceT;
 
     ctx.save();
-    ctx.translate(pose.x, pose.y - (selected ? cs * 0.06 : 0));
+    ctx.translate(pose.x, pose.y - (selected ? cs * 0.08 : 0));
     ctx.rotate(pose.angle);
     ctx.scale(scale, scale);
 
-    const rad = cs * 0.2;
+    const rad = cs * 0.24;
 
-    // Shadow.
     if (!ghost) {
-      ctx.fillStyle = selected ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.22)';
-      this.rr(-L / 2 + cs * 0.05, -W / 2 + cs * (selected ? 0.16 : 0.1), L, W, rad);
+      // Soft two-layer drop shadow.
+      ctx.fillStyle = 'rgba(20,30,45,0.12)';
+      this.rr(-L / 2 - cs * 0.04, -W / 2 + cs * (selected ? 0.2 : 0.12), L + cs * 0.08, W, rad * 1.2);
       ctx.fill();
+      ctx.fillStyle = 'rgba(20,30,45,0.2)';
+      this.rr(-L / 2 + cs * 0.03, -W / 2 + cs * (selected ? 0.16 : 0.09), L - cs * 0.02, W * 0.94, rad);
+      ctx.fill();
+
+      // Wheels peeking out on both sides.
+      ctx.fillStyle = '#252d38';
+      const ww = cs * 0.3, wh = cs * 0.12, wx = L / 2 - cs * 0.42, wy = W / 2 - cs * 0.02;
+      for (const sx of [-1, 1]) {
+        for (const sy of [-1, 1]) {
+          this.rr(sx * wx - ww / 2, sy * wy - wh / 2, ww, wh, wh / 2);
+          ctx.fill();
+        }
+      }
     }
 
     // Selection / hint glow.
     if (selected || hinted) {
       ctx.shadowColor = selected ? 'rgba(255,255,255,0.95)' : 'rgba(255,201,60,0.95)';
-      ctx.shadowBlur = cs * 0.4;
+      ctx.shadowBlur = cs * 0.5;
     }
 
-    // Body with a top-lit gradient.
+    // Body with a top-lit candy gradient.
     const grad = ctx.createLinearGradient(0, -W / 2, 0, W / 2);
-    grad.addColorStop(0, this.lighten(veh.color, 0.32));
-    grad.addColorStop(0.55, veh.color);
-    grad.addColorStop(1, this.lighten(veh.color, -0.18));
+    grad.addColorStop(0, this.lighten(veh.color, 0.42));
+    grad.addColorStop(0.45, this.lighten(veh.color, 0.08));
+    grad.addColorStop(1, this.lighten(veh.color, -0.25));
     ctx.fillStyle = grad;
     this.rr(-L / 2, -W / 2, L, W, rad);
     ctx.fill();
     ctx.shadowBlur = 0;
-    ctx.lineWidth = Math.max(1.5, cs * 0.045);
-    ctx.strokeStyle = 'rgba(0,0,0,0.22)';
+    ctx.lineWidth = Math.max(1.5, cs * 0.05);
+    ctx.strokeStyle = this.lighten(veh.color, -0.42);
     this.rr(-L / 2, -W / 2, L, W, rad);
     ctx.stroke();
 
-    const glass = '#2c3a4d';
-    if (veh.kind === 'van') {
-      // Cab at the front, boxy cargo behind.
-      ctx.fillStyle = glass;
-      this.rr(L * 0.22, -W * 0.34, L * 0.14, W * 0.68, cs * 0.08); ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,0.28)';
-      this.rr(-L * 0.44, -W * 0.36, L * 0.58, W * 0.72, cs * 0.1); ctx.fill();
-      ctx.fillStyle = this.lighten(veh.color, 0.15);
-      this.rr(-L * 0.42, -W * 0.32, L * 0.54, W * 0.64, cs * 0.09); ctx.fill();
-    } else {
-      // Car / long car: cabin with windshield + rear glass.
-      const cab = veh.len >= 3 ? L * 0.5 : L * 0.46;
-      ctx.fillStyle = this.lighten(veh.color, 0.18);
-      this.rr(-cab / 2, -W * 0.36, cab, W * 0.72, cs * 0.12); ctx.fill();
-      ctx.fillStyle = glass;
-      this.rr(cab / 2 - L * 0.1, -W * 0.3, L * 0.09, W * 0.6, cs * 0.06); ctx.fill();   // windshield
-      this.rr(-cab / 2 + L * 0.02, -W * 0.3, L * 0.07, W * 0.6, cs * 0.06); ctx.fill(); // rear glass
+    // Pulsing white ring around the selected car.
+    if (selected) {
+      ctx.strokeStyle = `rgba(255,255,255,${0.55 + 0.3 * Math.sin(t * 0.012)})`;
+      ctx.lineWidth = cs * 0.07;
+      this.rr(-L / 2 - cs * 0.09, -W / 2 - cs * 0.09, L + cs * 0.18, W + cs * 0.18, rad + cs * 0.09);
+      ctx.stroke();
     }
 
+    // Tinted glass with a white reflection notch.
+    const glassFill = (x, y, gw, gh, gr) => {
+      const gg = ctx.createLinearGradient(x, y, x, y + gh);
+      gg.addColorStop(0, '#3d5570');
+      gg.addColorStop(1, '#1f2f42');
+      ctx.fillStyle = gg;
+      this.rr(x, y, gw, gh, gr); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      this.rr(x + gw * 0.12, y + gh * 0.1, gw * 0.32, gh * 0.3, gr * 0.6); ctx.fill();
+    };
+
+    if (veh.kind === 'van') {
+      // Boxy cargo behind, cab glass at the front.
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
+      this.rr(-L * 0.46, -W * 0.38, L * 0.6, W * 0.76, rad * 0.5); ctx.fill();
+      ctx.fillStyle = this.lighten(veh.color, 0.2);
+      this.rr(-L * 0.44, -W * 0.34, L * 0.56, W * 0.68, rad * 0.45); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+      ctx.lineWidth = cs * 0.03;
+      for (let i = 0; i < 3; i++) {
+        const x = -L * 0.36 + i * L * 0.16;
+        ctx.beginPath(); ctx.moveTo(x, -W * 0.3); ctx.lineTo(x, W * 0.3); ctx.stroke();
+      }
+      glassFill(L * 0.2, -W * 0.36, L * 0.16, W * 0.72, cs * 0.08);
+    } else {
+      // Car / long car: rounded cabin, windshield, rear and side glass.
+      const cab = veh.len >= 3 ? L * 0.52 : L * 0.5;
+      ctx.fillStyle = this.lighten(veh.color, 0.22);
+      this.rr(-cab / 2, -W * 0.37, cab, W * 0.74, rad * 0.6); ctx.fill();
+      glassFill(cab / 2 - L * 0.13, -W * 0.33, L * 0.11, W * 0.66, cs * 0.07);
+      glassFill(-cab / 2 + L * 0.015, -W * 0.33, L * 0.09, W * 0.66, cs * 0.07);
+      ctx.fillStyle = '#2b3d52';
+      this.rr(-cab * 0.22, -W * 0.37, cab * 0.44, W * 0.1, cs * 0.03); ctx.fill();
+      this.rr(-cab * 0.22, W * 0.27, cab * 0.44, W * 0.1, cs * 0.03); ctx.fill();
+      if (veh.len >= 3) {
+        // Roof rails on the long car.
+        ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+        ctx.lineWidth = cs * 0.035;
+        ctx.beginPath(); ctx.moveTo(-cab * 0.18, -W * 0.18); ctx.lineTo(cab * 0.18, -W * 0.18); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(-cab * 0.18, W * 0.18); ctx.lineTo(cab * 0.18, W * 0.18); ctx.stroke();
+      }
+    }
+
+    // Glossy highlight streak along the top edge.
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    this.rr(-L / 2 + cs * 0.08, -W / 2 + cs * 0.05, L - cs * 0.4, W * 0.2, rad * 0.5);
+    ctx.fill();
+
     // Headlights (front = +x) and taillights.
-    ctx.fillStyle = '#ffe9a8';
-    ctx.beginPath(); ctx.arc(L / 2 - cs * 0.06, -W * 0.26, cs * 0.07, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(L / 2 - cs * 0.06, W * 0.26, cs * 0.07, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#ff5a4d';
-    ctx.fillRect(-L / 2 + cs * 0.02, -W * 0.3, cs * 0.05, W * 0.14);
-    ctx.fillRect(-L / 2 + cs * 0.02, W * 0.16, cs * 0.05, W * 0.14);
+    ctx.fillStyle = '#fff3c4';
+    this.rr(L / 2 - cs * 0.1, -W * 0.36, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
+    this.rr(L / 2 - cs * 0.1, W * 0.16, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
+    ctx.fillStyle = '#ff6459';
+    this.rr(-L / 2 + cs * 0.02, -W * 0.34, cs * 0.06, W * 0.18, cs * 0.02); ctx.fill();
+    this.rr(-L / 2 + cs * 0.02, W * 0.16, cs * 0.06, W * 0.18, cs * 0.02); ctx.fill();
 
     ctx.restore();
   }
@@ -1263,68 +1535,109 @@ class Renderer {
     const g = this.game, ctx = this.ctx, { cs } = this.view;
     const amb = g.ambulance;
     const pose = amb.px;
-    const L = amb.len * cs - cs * 0.18;
-    const W = cs * 0.82;
+    const L = amb.len * cs - cs * 0.16;
+    const W = cs * 0.86;
+    const on = amb.lights;
+    const phase = Math.floor(t / 130) % 2 === 0;
 
     ctx.save();
     ctx.translate(pose.x, pose.y);
     ctx.rotate(pose.angle);
 
-    // Strong shadow.
-    ctx.fillStyle = 'rgba(0,0,0,0.28)';
-    this.rr(-L / 2 + cs * 0.05, -W / 2 + cs * 0.12, L, W, cs * 0.18);
-    ctx.fill();
+    // Soft double shadow (the hero vehicle gets the strongest one).
+    ctx.fillStyle = 'rgba(20,30,45,0.14)';
+    this.rr(-L / 2 - cs * 0.05, -W / 2 + cs * 0.15, L + cs * 0.1, W, cs * 0.26); ctx.fill();
+    ctx.fillStyle = 'rgba(20,30,45,0.24)';
+    this.rr(-L / 2 + cs * 0.03, -W / 2 + cs * 0.1, L - cs * 0.02, W * 0.94, cs * 0.22); ctx.fill();
 
-    // Body.
-    const grad = ctx.createLinearGradient(0, -W / 2, 0, W / 2);
-    grad.addColorStop(0, '#ffffff');
-    grad.addColorStop(1, '#dfe5ec');
-    ctx.fillStyle = grad;
-    this.rr(-L / 2, -W / 2, L, W, cs * 0.18);
-    ctx.fill();
-    ctx.lineWidth = Math.max(1.5, cs * 0.045);
-    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
-    this.rr(-L / 2, -W / 2, L, W, cs * 0.18);
-    ctx.stroke();
-
-    // Red side stripes.
-    ctx.fillStyle = '#e8443a';
-    ctx.fillRect(-L / 2 + cs * 0.06, -W / 2 + cs * 0.05, L - cs * 0.24, cs * 0.09);
-    ctx.fillRect(-L / 2 + cs * 0.06, W / 2 - cs * 0.14, L - cs * 0.24, cs * 0.09);
-
-    // Windshield.
-    ctx.fillStyle = '#2c3a4d';
-    this.rr(L * 0.24, -W * 0.32, L * 0.13, W * 0.64, cs * 0.07);
-    ctx.fill();
-
-    // Roof medical cross.
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath(); ctx.arc(-L * 0.1, 0, W * 0.26, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = '#e8443a'; ctx.lineWidth = Math.max(1.5, cs * 0.04);
-    ctx.beginPath(); ctx.arc(-L * 0.1, 0, W * 0.26, 0, Math.PI * 2); ctx.stroke();
-    ctx.fillStyle = '#e8443a';
-    const cw = W * 0.3, ct2 = W * 0.1;
-    ctx.fillRect(-L * 0.1 - cw / 2, -ct2 / 2, cw, ct2);
-    ctx.fillRect(-L * 0.1 - ct2 / 2, -cw / 2, ct2, cw);
-
-    // Light bar (flashes when active).
-    const flashPhase = Math.floor(t / 140) % 2 === 0;
-    const on = amb.lights;
-    ctx.fillStyle = on && flashPhase ? '#ff3b30' : '#a33';
-    ctx.fillRect(L * 0.12, -W * 0.3, cs * 0.1, W * 0.26);
-    ctx.fillStyle = on && !flashPhase ? '#3b8bff' : '#336';
-    ctx.fillRect(L * 0.12, W * 0.04, cs * 0.1, W * 0.26);
-    if (on) {
-      ctx.globalAlpha = 0.4 + 0.3 * Math.sin(t * 0.03);
-      ctx.fillStyle = flashPhase ? 'rgba(255,60,50,0.5)' : 'rgba(60,140,255,0.5)';
-      ctx.beginPath(); ctx.arc(L * 0.16, 0, cs * 0.55, 0, Math.PI * 2); ctx.fill();
-      ctx.globalAlpha = 1;
+    // Wheels.
+    ctx.fillStyle = '#252d38';
+    const ww = cs * 0.32, wh = cs * 0.13;
+    for (const sx of [-1, 1]) {
+      for (const sy of [-1, 1]) {
+        this.rr(sx * (L / 2 - cs * 0.42) - ww / 2, sy * (W / 2 - cs * 0.015) - wh / 2, ww, wh, wh / 2);
+        ctx.fill();
+      }
     }
 
-    // Headlights.
-    ctx.fillStyle = '#ffe9a8';
-    ctx.beginPath(); ctx.arc(L / 2 - cs * 0.05, -W * 0.26, cs * 0.075, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(L / 2 - cs * 0.05, W * 0.26, cs * 0.075, 0, Math.PI * 2); ctx.fill();
+    // White body.
+    const grad = ctx.createLinearGradient(0, -W / 2, 0, W / 2);
+    grad.addColorStop(0, '#ffffff');
+    grad.addColorStop(0.6, '#f2f5f9');
+    grad.addColorStop(1, '#ccd5df');
+    ctx.fillStyle = grad;
+    this.rr(-L / 2, -W / 2, L, W, cs * 0.2); ctx.fill();
+    ctx.lineWidth = Math.max(1.5, cs * 0.05);
+    ctx.strokeStyle = '#8d9aa9';
+    this.rr(-L / 2, -W / 2, L, W, cs * 0.2); ctx.stroke();
+
+    // Red side stripes + orange tail block.
+    ctx.fillStyle = '#e8443a';
+    ctx.fillRect(-L / 2 + cs * 0.08, -W / 2 + cs * 0.055, L - cs * 0.3, cs * 0.09);
+    ctx.fillRect(-L / 2 + cs * 0.08, W / 2 - cs * 0.145, L - cs * 0.3, cs * 0.09);
+    ctx.fillStyle = '#ffb42e';
+    ctx.fillRect(-L / 2 + cs * 0.04, -W * 0.3, cs * 0.07, W * 0.6);
+
+    // Roof module with the medical cross.
+    ctx.fillStyle = '#f7fafc';
+    this.rr(-L * 0.44, -W * 0.35, L * 0.6, W * 0.7, cs * 0.12); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+    ctx.lineWidth = Math.max(1, cs * 0.03);
+    this.rr(-L * 0.44, -W * 0.35, L * 0.6, W * 0.7, cs * 0.12); ctx.stroke();
+    ctx.fillStyle = '#e8443a';
+    const cw = W * 0.34, ct2 = W * 0.115, ccx = -L * 0.14;
+    this.rr(ccx - cw / 2, -ct2 / 2, cw, ct2, ct2 * 0.3); ctx.fill();
+    this.rr(ccx - ct2 / 2, -cw / 2, ct2, cw, ct2 * 0.3); ctx.fill();
+
+    // Windshield with reflection.
+    const gg = ctx.createLinearGradient(L * 0.22, 0, L * 0.36, 0);
+    gg.addColorStop(0, '#42597a');
+    gg.addColorStop(1, '#243447');
+    ctx.fillStyle = gg;
+    this.rr(L * 0.22, -W * 0.33, L * 0.13, W * 0.66, cs * 0.07); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    this.rr(L * 0.23, -W * 0.3, L * 0.045, W * 0.28, cs * 0.04); ctx.fill();
+
+    // Light bar: dark base with red + blue lamps; strobes + bloom when active.
+    ctx.fillStyle = '#33404f';
+    this.rr(L * 0.1, -W * 0.36, cs * 0.13, W * 0.72, cs * 0.04); ctx.fill();
+    if (on) {
+      ctx.save();
+      ctx.shadowBlur = cs * 0.5;
+      ctx.shadowColor = phase ? 'rgba(255,60,50,0.95)' : 'rgba(255,60,50,0.2)';
+      ctx.fillStyle = phase ? '#ff453a' : '#7a1f1f';
+      this.rr(L * 0.105, -W * 0.34, cs * 0.11, W * 0.31, cs * 0.03); ctx.fill();
+      ctx.shadowColor = !phase ? 'rgba(70,140,255,0.95)' : 'rgba(70,140,255,0.2)';
+      ctx.fillStyle = !phase ? '#3f8bff' : '#1d3766';
+      this.rr(L * 0.105, W * 0.03, cs * 0.11, W * 0.31, cs * 0.03); ctx.fill();
+      ctx.restore();
+      // Rotating ground bloom.
+      ctx.globalAlpha = 0.3 + 0.2 * Math.sin(t * 0.03);
+      ctx.fillStyle = phase ? 'rgba(255,70,60,0.5)' : 'rgba(80,150,255,0.5)';
+      ctx.beginPath(); ctx.arc(L * 0.16, 0, cs * 0.7, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.fillStyle = '#a04038';
+      this.rr(L * 0.105, -W * 0.34, cs * 0.11, W * 0.31, cs * 0.03); ctx.fill();
+      ctx.fillStyle = '#33518f';
+      this.rr(L * 0.105, W * 0.03, cs * 0.11, W * 0.31, cs * 0.03); ctx.fill();
+    }
+
+    // Headlights + light beams while racing.
+    ctx.fillStyle = '#fff3c4';
+    this.rr(L / 2 - cs * 0.1, -W * 0.34, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
+    this.rr(L / 2 - cs * 0.1, W * 0.14, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
+    if (on) {
+      ctx.fillStyle = 'rgba(255,240,180,0.16)';
+      for (const sy of [-1, 1]) {
+        ctx.beginPath();
+        ctx.moveTo(L / 2 - cs * 0.02, sy * W * 0.24);
+        ctx.lineTo(L / 2 + cs * 0.95, sy * W * 0.52);
+        ctx.lineTo(L / 2 + cs * 0.95, sy * W * 0.04);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
 
     ctx.restore();
   }
@@ -1624,6 +1937,7 @@ class Game {
     this.animator.job = null;
 
     this.buildDecor(def);
+    this.renderer.groundDirty = true; // new board + decor -> repaint scenery cache
     this.syncAllPoses();
 
     // Tutorial on first ever play of level 1.
@@ -1645,23 +1959,35 @@ class Game {
   }
 
   buildDecor(def) {
+    // Sizes are stored as fractions of a cell, so resizes never need a rebuild.
     this.decor = [];
     const rand = mulberry32(def.id * 1337 + 7);
+    const b = this.board;
+    const nearRoad = (r, c) =>
+      [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dr, dc]) => {
+        const nr = r + dr, nc = c + dc;
+        return nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && b.drivable[nr][nc];
+      });
     for (let r = 0; r < ROWS; r++) {
       for (let c = 0; c < COLS; c++) {
-        if (this.board.drivable[r][c]) continue;
+        if (b.drivable[r][c]) continue;
         const roll = rand();
-        if (roll < 0.3) {
-          this.decor.push({ kind: 'tree', x: c + 0.3 + rand() * 0.4, y: r + 0.3 + rand() * 0.4, s: 10 + rand() * 6, seed: rand() });
-        } else if (roll < 0.45) {
-          this.decor.push({ kind: 'bush', x: c + 0.25 + rand() * 0.5, y: r + 0.25 + rand() * 0.5, s: 5 + rand() * 4, seed: rand() });
-        } else if (roll < 0.62) {
-          this.decor.push({ kind: 'flower', x: c + 0.2 + rand() * 0.6, y: r + 0.2 + rand() * 0.6, s: 2, seed: rand() });
+        const jx = () => 0.3 + rand() * 0.4;
+        if (roll < 0.08 && r > 0 && r < ROWS - 1) {
+          this.decor.push({ kind: 'house', x: c + 0.5, y: r + 0.5, s: 0.92, seed: rand() });
+        } else if (roll < 0.34) {
+          this.decor.push({ kind: 'tree', x: c + jx(), y: r + jx(), s: 0.3 + rand() * 0.14, seed: rand() });
+        } else if (roll < 0.46) {
+          this.decor.push({ kind: 'bush', x: c + jx(), y: r + jx(), s: 0.16 + rand() * 0.08, seed: rand() });
+        } else if (roll < 0.52 && nearRoad(r, c) && r > 0 && r < ROWS - 1) {
+          this.decor.push({ kind: 'hydrant', x: c + 0.5, y: r + 0.5, s: 0.3, seed: rand() });
+        } else if (roll < 0.6) {
+          this.decor.push({ kind: 'rock', x: c + jx(), y: r + jx(), s: 0.14 + rand() * 0.08, seed: rand() });
+        } else if (roll < 0.74) {
+          this.decor.push({ kind: 'flower', x: c + jx(), y: r + jx(), s: 0.16, seed: rand() });
         }
       }
     }
-    // Convert sizes from px-ish to cell fractions at draw time; store relative.
-    for (const d of this.decor) d.s = d.s / 32 * this.renderer.view.cs;
   }
 
   syncAllPoses() {
@@ -1673,10 +1999,7 @@ class Game {
   }
 
   onResize() {
-    this.renderer.resize();
-    // Rescale decor sizes with the new cell size.
-    const def = this.levelDef();
-    if (def) this.buildDecor(def);
+    this.renderer.resize(); // marks the scenery cache dirty itself
     if (!this.animator.busy) this.syncAllPoses();
   }
 
