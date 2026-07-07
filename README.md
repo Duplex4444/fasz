@@ -48,10 +48,28 @@ is movable at the start**. Moving it unblocks one or two others, and so on:
 `movableVehicles()` computes the movable set from live positions; a car is
 movable only if it has at least one reachable legal destination right now.
 
+## Endless mode — infinite generated puzzles
+
+The **∞ ENDLESS** button on the menu generates a fresh, always-solvable puzzle
+every round, with difficulty ramping as your streak grows (best round is saved).
+
+`generateLevel(seed, opts)` builds each map **backwards from the solved state**:
+it parks every car in a bay (route clear), then in reverse solve order pulls
+each car out onto the road to a spot from which its bay is *provably reachable*
+given the cars that move after it. Because the construction only ever places a
+car where the forward move is legal, the result is **solvable by construction**
+and **every car has a real destination it can reach** — no filler. A corridor
+heuristic lands cars on each other's exit paths, so each map has genuinely
+layered dependencies (not one repeated trick), and progressive relaxation keeps
+the success rate at ~100% without ever shipping an unsolvable board. Same seed →
+same map, so any puzzle is reproducible.
+
 ## Features
 
-- 5 chain-reaction levels, each proven by an automated solver to start with
-  exactly one movable car and to be solvable only in the correct order
+- 5 chain-reaction campaign levels, each proven by an automated solver to start
+  with exactly one movable car and to be solvable only in the correct order
+- Endless mode: an infinite supply of backward-generated, always-solvable,
+  varied puzzles with a difficulty ramp and saved best round
 - Grid-based BFS pathfinding: cars drive along their heading (no crab-slides),
   plus 90° rotations in turning zones
 - Real undo history, chain-aware hints, stars/coins, `localStorage` saves

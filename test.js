@@ -11,7 +11,7 @@
 const G = require('./game.js');
 const {
   LEVELS, AMB_ID, ROWS, COLS, parseBoard, footprint, spaceCells,
-  computeTargets, movableVehicles, routeIsClear, solveLevel, validateLevel,
+  computeTargets, movableVehicles, routeIsClear, solveLevel, validateLevel, generateLevel,
 } = G;
 
 let pass = 0, fail = 0;
@@ -186,6 +186,79 @@ for (const def of LEVELS) {
   // When only one car is movable, the correct hint is unambiguous: that car.
   ok(startMovable.length === 1 && sol && sol[0].vehicleId === startMovable[0],
     `level ${def.id}: the single movable car is the correct first move (${startMovable[0]})`);
+}
+
+/* ==================== 7. infinite generator (Endless mode) ================ */
+console.log('\n== Procedural generator: infinite solvable, varied puzzles ==');
+{
+  const N = 120;                       // generate many across sizes/seeds
+  let good = 0, blockedAll = true, solvableAll = true, everyCarMoves = true;
+  let distinctStructures = new Set();
+  let sizeOk = true, offRouteBays = true, noDisappear = true;
+  for (let i = 0; i < N; i++) {
+    const cars = 6 + (i % 7);          // 6..12
+    const def = generateLevel(1234567 + i * 101, { cars });
+    if (!def) { solvableAll = false; continue; }
+    if (def.vehicles.length !== cars) sizeOk = false;
+
+    const board = parseBoard(def);
+    const vs = def.vehicles.map(v => ({ ...v }));
+    vs.push({ id: AMB_ID, r: def.ambulance.r, c: def.ambulance.c, orient: 'v', len: 2 });
+
+    // Ambulance blocked at the start.
+    if (routeIsClear(board, vs)) blockedAll = false;
+
+    // Bays are all off the emergency route (cars never park on col 3).
+    for (const sp of def.spaces) {
+      if (spaceCells(sp).some(([r, c]) => board.routeSet.has(r + ',' + c))) offRouteBays = false;
+    }
+
+    // Provably solvable by the real solver, and it clears the route.
+    const sol = solveLevel(board, vs, def.spaces, def.vehicles.length + 3);
+    if (!sol) { solvableAll = false; continue; }
+    // Replay the solution: every moved car lands in a real bay; nobody vanishes.
+    let cur = vs;
+    for (const m of sol) {
+      const sp = def.spaces.find(s => s.id === m.spaceId);
+      if (!sp) noDisappear = false;
+      cur = cur.map(v => v.id === m.vehicleId ? { ...v, r: m.r, c: m.c, orient: m.orient } : v);
+    }
+    if (!routeIsClear(board, cur)) solvableAll = false;
+    if (cur.filter(v => v.id !== AMB_ID).length !== def.vehicles.length) noDisappear = false;
+
+    // "Every car has a purpose": most cars actually move in the solution.
+    const moved = new Set(sol.map(m => m.vehicleId));
+    if (moved.size < Math.ceil(def.vehicles.length * 0.5)) everyCarMoves = false;
+
+    // Layered (not everything movable at once): at least one car blocked at start.
+    const sm = movableVehicles(board, vs, def.spaces).length;
+    if (sm >= def.vehicles.length) distinctStructures.add('trivial');
+
+    // Fingerprint the layout to confirm maps really differ.
+    distinctStructures.add(def.vehicles.map(v => `${v.orient}${v.len}@${v.r},${v.c}`).join('|'));
+    good++;
+  }
+  ok(good === N, `generated all ${N} levels (got ${good})`);
+  ok(sizeOk, 'each generated level has the requested car count');
+  ok(blockedAll, 'every generated level starts with the ambulance blocked');
+  ok(solvableAll, 'every generated level is solvable and the solution clears the route');
+  ok(offRouteBays, 'generated parking bays are never on the emergency route');
+  ok(noDisappear, 'no vehicle disappears; every moved car lands in a real bay');
+  ok(everyCarMoves, 'most cars have a real purpose (move in the solution)');
+  ok(!distinctStructures.has('trivial'), 'no generated level is trivially all-movable at once');
+  ok(distinctStructures.size >= N - 2, `generated maps are distinct (${distinctStructures.size}/${N} unique)`);
+
+  // Determinism: same seed -> same map (needed for reproducible bug reports).
+  const a = generateLevel(42, { cars: 9 }), b = generateLevel(42, { cars: 9 });
+  ok(JSON.stringify(a.vehicles) === JSON.stringify(b.vehicles), 'generation is deterministic per seed');
+
+  // A layered example: report movable-at-start for a sample.
+  const sample = generateLevel(2024, { cars: 10 });
+  const sb = parseBoard(sample);
+  const svs = sample.vehicles.map(v => ({ ...v }));
+  svs.push({ id: AMB_ID, r: sample.ambulance.r, c: sample.ambulance.c, orient: 'v', len: 2 });
+  console.log(`    sample(seed 2024,10 cars): par ${sample.par}, movable@start ` +
+    `${movableVehicles(sb, svs, sample.spaces).length}`);
 }
 
 /* --------------------------------- summary -------------------------------- */

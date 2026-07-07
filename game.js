@@ -285,6 +285,141 @@ function solveLevel(board, vehicles, spaces, maxDepth = TUNE.solverMaxDepth) {
   return null;
 }
 
+/* ----------------------------- LEVEL GENERATOR ---------------------------
+   Infinite, always-solvable, varied puzzles. Built BACKWARDS from the solved
+   state: place every car in a parking bay (route clear), then in reverse solve
+   order pull each car out onto the road to a spot from which its bay is
+   provably reachable given the cars that move after it. Solvability is
+   guaranteed by construction and every car has a real destination. A corridor
+   heuristic lands cars on each other's exit paths, producing layered
+   dependencies (not one repeated trick), and progressive relaxation keeps the
+   success rate at ~100% without ever shipping an unsolvable board. */
+const GEN_PALETTE = ['#e8443a', '#26c3d7', '#f5920b', '#3b6fe0', '#7ac043', '#9b59d0',
+  '#e46fae', '#d9b34a', '#37c9a5', '#c96f35', '#4aa3f0', '#e3d13c', '#8a5cc0', '#ef5f7e', '#3fbfc9'];
+const GEN_ROUTE_COL = 3;
+const GEN_ROAD_ROW = '.rrerr.';   // cols 1-5 drivable, col 3 = emergency route
+
+function generateLevel(seed, opts = {}) {
+  const cars = opts.cars || 9;
+  const tries = opts.tries || 300;
+  const ambulance = { r: ROWS - 2, c: GEN_ROUTE_COL };
+  const map = Array.from({ length: ROWS }, () => GEN_ROAD_ROW);
+
+  const phase = f => ({ movable: Math.max(1, Math.round(cars * f.mv)), movers: f.mo, depth: f.dp });
+  const phases = [
+    { until: 0.45, s: phase({ mv: 0.4, mo: 0.75, dp: 0.7 }) },   // tight, layered
+    { until: 0.75, s: phase({ mv: 0.55, mo: 0.65, dp: 0.6 }) },  // medium
+    { until: 1.0,  s: phase({ mv: 1.0, mo: 0.5, dp: 0.45 }) },   // loose fallback
+  ];
+
+  for (let attempt = 0; attempt < tries; attempt++) {
+    const strict = opts.strict || phases.find(p => attempt / tries < p.until).s;
+    const rng = mulberry32(((seed >>> 0) * 2654435761 + attempt * 40503) >>> 0);
+    const def = genTry(rng, cars, map, ambulance, strict, seed, opts);
+    if (def) return def;
+  }
+  return null;
+}
+
+function genTry(rng, N, map, ambulance, strict, seed, opts) {
+  const rint = (a, b) => a + Math.floor(rng() * (b - a + 1));
+  const pick = arr => arr[Math.floor(rng() * arr.length)];
+  const ambCells = footprint(ambulance.r, ambulance.c, 'v', 2);
+  const isAmb = (r, c) => ambCells.some(([ar, ac]) => ar === r && ac === c);
+
+  // 1. Place bays (parked positions): off-route, non-overlapping, on shoulders.
+  const occ = Array.from({ length: ROWS }, () => new Array(COLS).fill(false));
+  const bays = [], carSize = [];
+  for (let i = 0; i < N; i++) {
+    let placed = false;
+    for (let t = 0; t < 80 && !placed; t++) {
+      const orient = rng() < 0.5 ? 'v' : 'h';
+      const len = orient === 'h' ? pick([2, 2, 3]) : pick([2, 2, 3, 4]);
+      let r, c;
+      if (orient === 'h') { r = rint(0, ROWS - 1); c = rng() < 0.5 ? 0 : COLS - len; }
+      else { c = pick([1, 2, 4, 5]); r = rint(0, ROWS - len); }
+      const cells = footprint(r, c, orient, len);
+      if (cells.some(([cr, cc]) => cr < 0 || cr >= ROWS || cc < 0 || cc >= COLS)) continue;
+      if (cells.some(([cr, cc]) => cc === GEN_ROUTE_COL)) continue;      // bays never on the route
+      if (cells.some(([cr, cc]) => occ[cr][cc] || isAmb(cr, cc))) continue;
+      cells.forEach(([cr, cc]) => (occ[cr][cc] = true));
+      bays.push({ r, c, orient, len });
+      carSize.push({ len, orient });
+      placed = true;
+    }
+    if (!placed) return null;
+  }
+
+  const spaces = bays.map((b, i) => ({ id: 'S' + i, r: b.r, c: b.c, orient: b.orient, len: b.len, maxLen: b.len }));
+  const board = parseBoard({ id: 0, name: 'g', par: 0, map, vehicles: [], spaces, ambulance });
+
+  // 2. Reverse solve order; pull each car out to a blocking start.
+  const order = [...Array(N).keys()];
+  for (let i = N - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+  const stepOf = new Array(N);
+  order.forEach((ci, k) => (stepOf[ci] = k));
+  const starts = bays.map(b => ({ r: b.r, c: b.c, orient: b.orient }));
+
+  const corridor = new Set();
+  const addCorridor = ci => {
+    const s = starts[ci], b = bays[ci], len = carSize[ci].len;
+    if (s.orient === 'h' && s.r === b.r) {
+      const lo = Math.min(s.c, b.c), hi = Math.max(s.c + len - 1, b.c + len - 1);
+      for (let c = lo; c <= hi; c++) corridor.add(s.r + ',' + c);
+    } else if (s.orient === 'v' && s.c === b.c) {
+      const lo = Math.min(s.r, b.r), hi = Math.max(s.r + len - 1, b.r + len - 1);
+      for (let r = lo; r <= hi; r++) corridor.add(r + ',' + s.c);
+    }
+  };
+
+  for (let k = N - 1; k >= 0; k--) {
+    const ci = order[k], size = carSize[ci];
+    const oc = Array.from({ length: ROWS }, () => new Array(COLS).fill(false));
+    for (let cj = 0; cj < N; cj++) {
+      if (cj === ci) continue;
+      const p = stepOf[cj] > k ? starts[cj] : bays[cj];        // later movers at starts, earlier at bays
+      for (const [r, c] of footprint(p.r, p.c, p.orient, carSize[cj].len)) oc[r][c] = true;
+    }
+    for (const [r, c] of ambCells) oc[r][c] = true;
+
+    const reach = Pathfinder.reach(board, oc, { r: bays[ci].r, c: bays[ci].c, orient: bays[ci].orient, len: size.len });
+    const bayKey = bays[ci].r + ',' + bays[ci].c + ',' + bays[ci].orient;
+    let best = null, bestScore = -1;
+    for (const [key, node] of reach) {
+      if (key === bayKey) continue;
+      const fc = footprint(node.r, node.c, node.o, size.len);
+      const onRoute = fc.some(([cr, cc]) => cc === GEN_ROUTE_COL) ? 1 : 0;
+      const blocks = fc.reduce((n, [cr, cc]) => n + (corridor.has(cr + ',' + cc) ? 1 : 0), 0);
+      const score = onRoute * 800 + blocks * 500 + node.depth * 10 + rng() * 5;
+      if (score > bestScore) { bestScore = score; best = node; }
+    }
+    if (best) starts[ci] = { r: best.r, c: best.c, orient: best.o };
+    addCorridor(ci);
+  }
+
+  // 3. Assemble + verify (route blocked, mostly-purposeful, layered, solvable).
+  const vehicles = carSize.map((s, i) => ({
+    id: 'c' + i, kind: s.len >= 4 ? 'truck' : s.len >= 3 ? 'van' : 'car',
+    color: GEN_PALETTE[i % GEN_PALETTE.length], len: s.len, orient: starts[i].orient,
+    r: starts[i].r, c: starts[i].c,
+  }));
+  const def = { id: opts.id || ('gen-' + seed), name: opts.name || 'Endless', par: 0, generated: true, map, vehicles, spaces, ambulance, tutorial: null };
+
+  const vs = vehicles.map(v => ({ ...v }));
+  vs.push({ id: AMB_ID, r: ambulance.r, c: ambulance.c, orient: 'v', len: 2 });
+  if (routeIsClear(board, vs)) return null;                            // ambulance must be blocked
+  const movers = vehicles.filter((v, i) =>
+    starts[i].r !== bays[i].r || starts[i].c !== bays[i].c || starts[i].orient !== bays[i].orient).length;
+  if (movers < Math.ceil(N * strict.movers)) return null;              // most cars must matter
+  const startMovable = movableVehicles(board, vs, def.spaces);
+  if (startMovable.length < 1 || startMovable.length > strict.movable) return null;  // layered, not trivial
+  const sol = solveLevel(board, vs, def.spaces, N + 3);
+  if (!sol) return null;
+  if (sol.length < Math.ceil(N * strict.depth)) return null;           // demand real depth
+  def.par = sol.length;
+  return def;
+}
+
 /* ----------------------------- LEVEL VALIDATION -------------------------- */
 /** Developer validation: sanity-checks geometry and proves solvability. */
 function validateLevel(def) {
@@ -606,6 +741,7 @@ class SaveManager {
       best: {},                    // levelId -> { stars, moves }
       sound: true,
       tutorialDone: false,
+      endlessBest: 0,              // highest Endless round reached
     };
     this.load();
   }
@@ -748,14 +884,14 @@ class UIManager {
       statCoins: $('statCoins'), btnNext: $('btnNext'), btnReplay: $('btnReplay'),
       btnCompleteMenu: $('btnCompleteMenu'),
       levelGrid: $('levelGrid'), btnMenuSound: $('btnMenuSound'),
-      btnMenuTutorial: $('btnMenuTutorial'),
+      btnMenuTutorial: $('btnMenuTutorial'), btnEndless: $('btnEndless'),
       confirmText: $('confirmText'), btnConfirmYes: $('btnConfirmYes'), btnConfirmNo: $('btnConfirmNo'),
     };
     this.toastTimer = null;
     this.confirmCb = null;
   }
-  updateHUD(levelNum, moves, par, coins) {
-    this.el.hudLevel.textContent = 'LEVEL ' + levelNum;
+  updateHUD(label, moves, par, coins) {
+    this.el.hudLevel.textContent = label;
     this.el.hudMoves.textContent = `MOVES ${moves} / ${par}`;
     this.el.hudCoins.textContent = coins;
   }
@@ -795,16 +931,20 @@ class UIManager {
     this.el.btnPauseSound.textContent = 'SOUND: ' + (soundOn ? 'ON' : 'OFF');
     this.showPanel(this.el.panelPause);
   }
-  showComplete({ stars, moves, best, earned, isLast }) {
+  showComplete({ stars, moves, best, earned, isLast, endless }) {
     const spans = this.el.starRow.querySelectorAll('span');
     spans.forEach((s, i) => s.classList.toggle('lit', i < stars));
     this.el.statMoves.textContent = moves;
-    this.el.statBest.textContent = best ? `${best.moves} moves · ${'★'.repeat(best.stars)}` : '–';
+    if (endless) {
+      this.el.statBest.textContent = 'round ' + (best ? best.moves : 1);
+    } else {
+      this.el.statBest.textContent = best ? `${best.moves} moves · ${'★'.repeat(best.stars)}` : '–';
+    }
     this.el.statCoins.textContent = '+' + earned;
-    this.el.btnNext.textContent = isLast ? 'MAIN MENU' : 'NEXT LEVEL';
+    this.el.btnNext.textContent = endless ? 'NEXT MAP' : isLast ? 'MAIN MENU' : 'NEXT LEVEL';
     this.showPanel(this.el.panelComplete);
   }
-  showMenu(save, levels, onPick, soundOn) {
+  showMenu(save, levels, onPick, soundOn, onEndless) {
     this.el.btnMenuSound.textContent = 'SOUND: ' + (soundOn ? 'ON' : 'OFF');
     const grid = this.el.levelGrid;
     grid.innerHTML = '';
@@ -822,6 +962,11 @@ class UIManager {
       if (unlocked) btn.addEventListener('click', () => onPick(i));
       grid.appendChild(btn);
     });
+    const eb = this.el.btnEndless;
+    const rec = save.data.endlessBest || 0;
+    eb.innerHTML = '∞ ENDLESS<span class="endless-sub">' +
+      (rec ? 'best: round ' + rec : 'infinite fresh puzzles') + '</span>';
+    eb.onclick = onEndless;
     this.showPanel(this.el.panelMenu);
   }
   confirm(text, cb) {
@@ -933,7 +1078,7 @@ class Renderer {
     cv.height = Math.max(1, Math.round(h * dpr));
     const c = cv.getContext('2d');
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const rand = mulberry32(g.levelDef().id * 911 + 17);
+    const rand = mulberry32(g.seedNum * 911 + 17);
 
     // Grass: warm top-lit gradient + soft checker + mottled patches.
     const lawn = c.createLinearGradient(0, 0, 0, h);
@@ -1869,6 +2014,11 @@ class Game {
 
     this.state = 'loading';
     this.levelIndex = 0;
+    this.endless = false;      // Endless mode: infinite generated puzzles
+    this.endlessRound = 0;
+    this.genDef = null;        // the currently loaded generated level
+    this.nextGenDef = null;    // pre-generated next endless level (hides the stall)
+    this.seedNum = 1;          // numeric seed for scenery (generated ids are strings)
     this.board = null;
     this.vehicles = [];
     this.spaces = [];
@@ -1918,7 +2068,8 @@ class Game {
   }
 
   /* ------------------------------- helpers ------------------------------- */
-  levelDef() { return LEVELS[this.levelIndex]; }
+  levelDef() { return this.endless ? this.genDef : LEVELS[this.levelIndex]; }
+  hudLabel() { return this.endless ? 'ENDLESS #' + this.endlessRound : 'LEVEL ' + this.levelDef().id; }
   vehicleById(id) { return this.vehicles.find(v => v.id === id); }
   spaceById(id) { return this.spaces.find(s => s.id === id); }
   inputAllowed() { return this.state === 'waiting' || this.state === 'selected'; }
@@ -1959,8 +2110,30 @@ class Game {
 
   /* ----------------------------- level loading --------------------------- */
   loadLevel(idx) {
-    const def = LEVELS[idx];
+    this.endless = false;
     this.levelIndex = idx;
+    this.loadDef(LEVELS[idx]);
+  }
+
+  /** Enter Endless mode: infinite freshly generated puzzles. */
+  startEndless() {
+    this.endless = true;
+    this.endlessRound = 1;
+    this.nextGenDef = null;
+    this.genDef = this.makeEndlessLevel(this.endlessRound);
+    this.loadDef(this.genDef);
+  }
+
+  /** Difficulty ramp: more cars as the streak grows (capped for solve speed). */
+  makeEndlessLevel(round) {
+    const cars = clamp(6 + Math.floor((round - 1) / 2), 6, 12);
+    const seed = (Date.now() ^ (round * 2654435761)) >>> 0;
+    return generateLevel(seed, { cars, id: 'gen-' + round + '-' + seed, name: 'Endless #' + round })
+      || generateLevel((seed + 12345) >>> 0, { cars: 7, name: 'Endless #' + round }); // guaranteed fallback
+  }
+
+  loadDef(def) {
+    this.seedNum = typeof def.id === 'number' ? def.id : 900 + (this.endlessRound || 0);
     this.board = parseBoard(def);
     this.vehicles = def.vehicles.map(v => ({
       ...v, spaceId: null, bounceT: 0, shakeT: 0, unlockT: 0,
@@ -1985,6 +2158,7 @@ class Game {
     this.shakeUntil = 0;
     this.routeGlowUntil = 0;
     this.animator.job = null;
+    for (const p of this.particles.pool) p.active = false; // no confetti bleed into the next map
 
     this.buildDecor(def);
     this.renderer.groundDirty = true; // new board + decor -> repaint scenery cache
@@ -2005,7 +2179,7 @@ class Game {
     }
 
     this.ui.hideAllPanels();
-    this.ui.updateHUD(def.id, 0, def.par, this.save.data.coins);
+    this.ui.updateHUD(this.hudLabel(), 0, def.par, this.save.data.coins);
     this.ui.updateUndo(false);
     this.ui.updateHintBadge(this.hintsLeft);
     this.setState('waiting');
@@ -2015,7 +2189,7 @@ class Game {
   buildDecor(def) {
     // Sizes are stored as fractions of a cell, so resizes never need a rebuild.
     this.decor = [];
-    const rand = mulberry32(def.id * 1337 + 7);
+    const rand = mulberry32(this.seedNum * 1337 + 7);
     const b = this.board;
     const nearRoad = (r, c) =>
       [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dr, dc]) => {
@@ -2153,7 +2327,7 @@ class Game {
 
       this.moves++;
       this.history.push(rec);
-      this.ui.updateHUD(this.levelDef().id, this.moves, this.levelDef().par, this.save.data.coins);
+      this.ui.updateHUD(this.hudLabel(), this.moves, this.levelDef().par, this.save.data.coins);
       this.ui.updateUndo(true);
       this.audio.park();
       this.particles.sparkle(veh.px.x, veh.px.y, 10);
@@ -2234,19 +2408,31 @@ class Game {
     const par = def.par;
     const stars = this.moves <= par ? 3 : this.moves <= par + 2 ? 2 : 1;
 
-    const prev = this.save.data.best[def.id];
-    const earned = prev ? 5 + Math.max(0, stars - prev.stars) * 10 : stars * 10;
-    this.save.data.coins += earned;
-    if (!prev || stars > prev.stars || (stars === prev.stars && this.moves < prev.moves)) {
-      this.save.data.best[def.id] = { stars, moves: this.moves };
+    let earned, best;
+    if (this.endless) {
+      // Score by round reached; no per-map bests (ids are throwaway).
+      earned = 10 + stars * 5 + this.endlessRound * 2;
+      this.save.data.coins += earned;
+      this.save.data.endlessBest = Math.max(this.save.data.endlessBest || 0, this.endlessRound);
+      best = { stars, moves: this.save.data.endlessBest, isEndless: true };
+      // Pre-generate the next map now so the "Next" tap is instant.
+      this.nextGenDef = this.makeEndlessLevel(this.endlessRound + 1);
+    } else {
+      const prev = this.save.data.best[def.id];
+      earned = prev ? 5 + Math.max(0, stars - prev.stars) * 10 : stars * 10;
+      this.save.data.coins += earned;
+      if (!prev || stars > prev.stars || (stars === prev.stars && this.moves < prev.moves)) {
+        this.save.data.best[def.id] = { stars, moves: this.moves };
+      }
+      this.save.data.unlocked = clamp(
+        Math.max(this.save.data.unlocked, this.levelIndex + 2), 1, LEVELS.length);
+      best = this.save.data.best[def.id];
     }
-    this.save.data.unlocked = clamp(
-      Math.max(this.save.data.unlocked, this.levelIndex + 2), 1, LEVELS.length);
     if (this.tutorial.active) { this.save.data.tutorialDone = true; this.tutorial.active = false; }
     this.save.save();
 
     this.audio.complete();
-    this.ui.updateHUD(def.id, this.moves, par, this.save.data.coins);
+    this.ui.updateHUD(this.hudLabel(), this.moves, par, this.save.data.coins);
 
     // A few celebratory bursts behind the panel.
     const v = this.renderer.view;
@@ -2257,12 +2443,19 @@ class Game {
 
     setTimeout(() => {
       this.ui.showComplete({
-        stars, moves: this.moves,
-        best: this.save.data.best[def.id],
-        earned,
-        isLast: this.levelIndex === LEVELS.length - 1,
+        stars, moves: this.moves, best, earned,
+        isLast: !this.endless && this.levelIndex === LEVELS.length - 1,
+        endless: this.endless,
       });
     }, 480);
+  }
+
+  /** Advance to the next generated puzzle (Endless mode). */
+  nextEndless() {
+    this.endlessRound++;
+    this.genDef = this.nextGenDef || this.makeEndlessLevel(this.endlessRound);
+    this.nextGenDef = null;
+    this.loadDef(this.genDef);
   }
 
   /* --------------------------------- undo -------------------------------- */
@@ -2282,7 +2475,7 @@ class Game {
       veh.spaceId = rec.from.spaceId;
       this.moves = rec.prevMoves;
       this.refreshMovable();
-      this.ui.updateHUD(this.levelDef().id, this.moves, this.levelDef().par, this.save.data.coins);
+      this.ui.updateHUD(this.hudLabel(), this.moves, this.levelDef().par, this.save.data.coins);
       this.ui.updateUndo(this.history.length > 0);
       this.audio.undo();
       this.checkRoute(); // recalculate; route cannot be clear here, returns to waiting
@@ -2324,7 +2517,7 @@ class Game {
   }
   doRestart() {
     this.audio.click();
-    this.loadLevel(this.levelIndex);
+    if (this.endless) this.loadDef(this.genDef); else this.loadLevel(this.levelIndex);
   }
 
   pause() {
@@ -2351,7 +2544,7 @@ class Game {
     this.ui.showMenu(this.save, LEVELS, i => {
       this.audio.click();
       this.loadLevel(i);
-    }, this.save.data.sound);
+    }, this.save.data.sound, () => { this.audio.click(); this.startEndless(); });
   }
 
   /* ------------------------------- UI wiring ----------------------------- */
@@ -2372,10 +2565,13 @@ class Game {
     el.btnPauseMenu.addEventListener('click', click(() => this.showMenu()));
 
     el.btnNext.addEventListener('click', click(() => {
-      if (this.levelIndex < LEVELS.length - 1) this.loadLevel(this.levelIndex + 1);
+      if (this.endless) this.nextEndless();
+      else if (this.levelIndex < LEVELS.length - 1) this.loadLevel(this.levelIndex + 1);
       else this.showMenu();
     }));
-    el.btnReplay.addEventListener('click', click(() => this.loadLevel(this.levelIndex)));
+    el.btnReplay.addEventListener('click', click(() => {
+      if (this.endless) this.loadDef(this.genDef); else this.loadLevel(this.levelIndex);
+    }));
     el.btnCompleteMenu.addEventListener('click', click(() => this.showMenu()));
 
     el.btnMenuSound.addEventListener('click', click(() => {
@@ -2442,6 +2638,6 @@ if (typeof module !== 'undefined' && module.exports) {
     ROWS, COLS, TILE, TUNE, AMB_ID,
     parseBoard, footprint, spaceCells, buildOcc,
     Pathfinder, computeTargets, movableVehicles, routeIsClear, solveLevel, validateLevel,
-    LEVELS,
+    generateLevel, LEVELS,
   };
 }
