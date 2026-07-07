@@ -31,7 +31,7 @@ const TUNE = {
   historyMax:   30,           // undo history depth (spec asks for >= 20)
   tapSlopPx:    12,           // movement below this is a tap, above is a drag
   hintShowMs:   4500,
-  solverMaxDepth: 8,
+  solverMaxDepth: 14,         // longest chain (level 5) is 11 moves
 };
 
 const AMB_ID = '__amb';
@@ -123,9 +123,11 @@ function buildOcc(vehicles, exceptId) {
 /* ------------------------------ PATHFINDER ------------------------------- */
 /**
  * Breadth-first search over vehicle states (anchor row, anchor col, orientation).
- * Actions: slide one cell in any of 4 directions through free drivable cells,
- * or rotate 90° when the anchor sits in a turning zone and the full LxL sweep
- * square is free. Returns Map "r,c,o" -> node {r,c,o,depth,prev}.
+ * Vehicles drive like cars: one cell forward or reverse ALONG their heading
+ * (vertical cars move up/down, horizontal cars move left/right — never a
+ * sideways crab-slide), or rotate 90° when the anchor sits in a turning zone
+ * and the full LxL sweep square is free.
+ * Returns Map "r,c,o" -> node {r,c,o,depth,prev}.
  */
 const Pathfinder = {
   reach(board, occ, veh) {
@@ -137,12 +139,12 @@ const Pathfinder = {
     const start = { r: veh.r, c: veh.c, o: veh.orient, depth: 0, prev: null };
     nodes.set(keyOf(start.r, start.c, start.o), start);
     const q = [start];
-    const DIRS = [[-1, 0], [1, 0], [0, -1], [0, 1]];
 
     while (q.length) {
       const n = q.shift();
-      // Slides
-      for (const [dr, dc] of DIRS) {
+      // Forward / reverse along the current heading only.
+      const dirs = n.o === 'v' ? [[-1, 0], [1, 0]] : [[0, -1], [0, 1]];
+      for (const [dr, dc] of dirs) {
         const nr = n.r + dr, nc = n.c + dc;
         const k = keyOf(nr, nc, n.o);
         if (!nodes.has(k) && fits(nr, nc, n.o)) {
@@ -194,6 +196,7 @@ function computeTargets(board, vehicles, spaces, movingId) {
 
   for (const sp of spaces) {
     if (veh.len > sp.maxLen || veh.len > sp.len) continue;
+    if (sp.minLen && veh.len < sp.minLen) continue; // long bays reserved for long vehicles
     const cells = spaceCells(sp);
     // Occupied by any other vehicle?
     if (cells.some(([r, c]) => occ[r][c])) continue;
@@ -220,6 +223,17 @@ function computeTargets(board, vehicles, spaces, movingId) {
     }
   }
   return targets;
+}
+
+/**
+ * The heart of the chain-reaction puzzle: a vehicle is MOVABLE only when it
+ * has at least one reachable legal parking destination right now. Everything
+ * else is blocked traffic.
+ */
+function movableVehicles(board, vehicles, spaces) {
+  return vehicles
+    .filter(v => v.id !== AMB_ID && computeTargets(board, vehicles, spaces, v.id).length > 0)
+    .map(v => v.id);
 }
 
 /** Is the full emergency route free of civilian vehicles? */
@@ -338,190 +352,161 @@ function validateLevel(def) {
     }
   }
 
-  // The definitive test: an actual solver run.
+  // The definitive tests: chain-puzzle structure + an actual solver run.
   let solution = null;
+  let startMovable = [];
   if (!errors.length) {
-    solution = solveLevel(board, vehicles, def.spaces);
+    if (routeIsClear(board, vehicles)) errors.push('emergency route is already clear at level start');
+    startMovable = movableVehicles(board, vehicles, def.spaces);
+    if (startMovable.length !== 1) {
+      errors.push(`level must start with exactly 1 movable vehicle, found ${startMovable.length}` +
+        (startMovable.length ? ` (${startMovable.join(', ')})` : ''));
+    }
+    solution = solveLevel(board, vehicles, def.spaces, Math.max(TUNE.solverMaxDepth, def.par + 2));
     if (!solution) errors.push('level is NOT solvable (solver found no solution)');
     else if (solution.length !== def.par) {
       warnings.push(`par is ${def.par} but the optimal solution takes ${solution.length} moves`);
     }
   }
-  return { ok: errors.length === 0, errors, warnings, solution };
+  return { ok: errors.length === 0, errors, warnings, solution, startMovable };
 }
 
 /* -------------------------------- LEVELS ---------------------------------
-   Grid: 14 rows (0 = top) x 7 cols. Road = cols 2-4, emergency route = col 3.
+   Chain-reaction traffic puzzles. Grid: 14 rows (0 = top) x 7 cols.
+   Drivable road = cols 1-5, emergency route = col 3 (marked 'e').
    Map chars: '.' grass  'r' road  'e' route  't' turning zone  'p' pavement.
-   Space cells become drivable automatically. Vehicle anchor = top-left cell. */
+   Parking-space cells become drivable automatically; a space with minLen is a
+   long bay reserved for long vehicles (van/truck). Vehicle anchor = top-left.
+
+   Every board is a dense jam where ONLY ONE vehicle can move at the start.
+   Moving it opens room for the next, so the level unravels as a chain:
+   opener -> gate -> the blocked cars drain into their bays -> ambulance exits.
+   Each level is proven by validateLevel(): exactly-1-movable-at-start,
+   route-blocked-at-start, and solvable (see test.js). */
+
+const ROAD_ROW = '.rrerr.';                  // cols 1-5 drivable, col 3 = route
+const roadMap = () => Array.from({ length: ROWS }, () => ROAD_ROW);
+const _V = (r, c, len, id, color, kind = 'car') => ({ id, kind, color, len, orient: 'v', r, c });
+const _H = (r, c, len, id, color, kind = 'car') => ({ id, kind, color, len, orient: 'h', r, c });
 
 const LEVELS = [
-  { /* ------------------------- LEVEL 1 — tutorial ------------------------ */
-    id: 1, name: 'First Rescue', par: 3, tutorial: true,
-    map: [
-      '..rer..',
-      '..rerp.',
-      '..rerp.',
-      '..rer..',
-      '..rer..',
-      '..rer..',
-      '..rer..',
-      '..rer..',
-      '..rer..',
-      '..rer..',
-      '.prer..',
-      '.prer..',
-      '..rer..',
-      '..rer..',
-    ],
+  { /* ---- LEVEL 1 — tutorial: one gate frees a stack of blocked cars ---- */
+    id: 1, name: 'First Rescue', par: 5,
+    tutorial: { vehicleId: 'gate', spaceId: 'GATE',
+      intro: 'The road is jammed! Only ONE vehicle can move first — the glowing one. Drive it into its bay to unlock the next car.' },
+    map: roadMap(),
     vehicles: [
-      { id: 'red',    kind: 'car',  color: '#e8443a', len: 2, orient: 'v', r: 10, c: 3 },
-      { id: 'cyan',   kind: 'long', color: '#26c3d7', len: 3, orient: 'h', r: 7,  c: 2 },
-      { id: 'orange', kind: 'van',  color: '#f5920b', len: 3, orient: 'h', r: 4,  c: 2 },
-      { id: 'blue',   kind: 'car',  color: '#3b6fe0', len: 2, orient: 'v', r: 1,  c: 4 },
+      _V(2, 5, 4, 'gate', '#8a5cc0', 'van'),      // the only opener (slides down)
+      _H(2, 3, 2, 'h1', '#e8443a'), _H(3, 3, 2, 'h2', '#26c3d7'),
+      _H(4, 3, 2, 'h3', '#f5920b'), _H(5, 3, 2, 'h4', '#3b6fe0'),
+      _V(0, 1, 2, 'bg1', '#7ac043'), _V(6, 1, 2, 'bg2', '#e46fae'),
+      _V(9, 1, 2, 'bg3', '#d9b34a'),              // background jam (boxed in)
     ],
     spaces: [
-      { id: 'P1', r: 10, c: 0, orient: 'v', len: 2, maxLen: 2 }, // lower-left, for the red car
-      { id: 'P2', r: 8,  c: 0, orient: 'h', len: 3, maxLen: 3 }, // wide middle-left bay
-      { id: 'P3', r: 3,  c: 4, orient: 'h', len: 3, maxLen: 3 }, // right loading bay
-      { id: 'P4', r: 1,  c: 6, orient: 'v', len: 2, maxLen: 2 }, // upper-right option
+      { id: 'GATE', r: 8, c: 5, orient: 'v', len: 4, maxLen: 4, minLen: 3 },
+      { id: 'B1', r: 2, c: 5, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'B2', r: 3, c: 5, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'B3', r: 4, c: 5, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'B4', r: 5, c: 5, orient: 'h', len: 2, maxLen: 2 },
     ],
     ambulance: { r: 12, c: 3 },
   },
 
-  { /* ------------------------------ LEVEL 2 ------------------------------ */
-    id: 2, name: 'Rush Hour', par: 3,
-    map: [
-      '..rer..',
-      '.prer..',
-      '.prer..',
-      '..rer..',
-      '..rerp.',
-      '..rerp.',
-      '..rer..',
-      '..rer..',
-      '..rerp.',
-      '..rerp.',
-      '.prer..',
-      '.prerp.',
-      '..rerp.',
-      '..rer..',
-    ],
+  { /* ---- LEVEL 2 — a small opener frees the gate; one decoy car ---- */
+    id: 2, name: 'Rush Hour', par: 6,
+    map: roadMap(),
     vehicles: [
-      { id: 'lime',   kind: 'car',  color: '#7ac043', len: 2, orient: 'v', r: 10, c: 3 },
-      { id: 'coral',  kind: 'long', color: '#f2695c', len: 3, orient: 'h', r: 7,  c: 2 },
-      { id: 'violet', kind: 'car',  color: '#9b59d0', len: 2, orient: 'v', r: 4,  c: 3 },
-      { id: 'sky',    kind: 'car',  color: '#4aa3f0', len: 2, orient: 'v', r: 8,  c: 4 },
-      { id: 'rose',   kind: 'car',  color: '#e46fae', len: 2, orient: 'v', r: 1,  c: 2 },
-      { id: 'sand',   kind: 'car',  color: '#d9b34a', len: 2, orient: 'v', r: 11, c: 4 },
+      _H(8, 4, 2, 'sc', '#7ac043'),               // opener: slides left to a bay
+      _V(2, 5, 4, 'gate', '#8a5cc0', 'van'),
+      _H(2, 3, 2, 'd1', '#e8443a'), _H(3, 3, 2, 'd2', '#26c3d7'),
+      _H(4, 3, 2, 'd3', '#f5920b'), _H(5, 3, 2, 'd4', '#3b6fe0'),
+      _V(0, 5, 2, 'decoy', '#e4b04f'),            // looks parkable, but is boxed in
+      _V(0, 2, 2, 'bg1', '#5b8fd0'), _V(6, 2, 2, 'bg2', '#c96f6f'),
+      _V(9, 2, 2, 'bg3', '#4aa39a'), _V(11, 2, 2, 'bg4', '#b06fd0'),
     ],
     spaces: [
-      { id: 'S1', r: 10, c: 0, orient: 'v', len: 2, maxLen: 2 },
-      { id: 'S2', r: 6,  c: 0, orient: 'h', len: 3, maxLen: 3 },
-      { id: 'S3', r: 4,  c: 6, orient: 'v', len: 2, maxLen: 2 },
-      { id: 'S4', r: 8,  c: 6, orient: 'v', len: 2, maxLen: 2 },
-      { id: 'S5', r: 1,  c: 0, orient: 'v', len: 2, maxLen: 2 },
-      { id: 'S6', r: 11, c: 6, orient: 'v', len: 2, maxLen: 2 },
+      { id: 'L8', r: 8, c: 0, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'GATE', r: 9, c: 5, orient: 'v', len: 4, maxLen: 4, minLen: 3 },
+      { id: 'B1', r: 2, c: 5, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'B2', r: 3, c: 5, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'B3', r: 4, c: 5, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'B4', r: 5, c: 5, orient: 'h', len: 2, maxLen: 2 },
     ],
     ambulance: { r: 12, c: 3 },
   },
 
-  { /* ------------------------------ LEVEL 3 ------------------------------ */
-    id: 3, name: 'The Long Van', par: 3,
-    map: [
-      '..rer..',
-      '..rerp.',
-      '..rerp.',
-      '..rerp.',
-      '..rerp.',
-      '..rerp.',
-      '..rer..',
-      '..rer..',
-      '.prer..',
-      '.prer..',
-      '.prer..',
-      '..rer..',
-      '..rer..',
-      '..rer..',
-    ],
+  { /* ---- LEVEL 3 — a long truck blocks four cars; free the small one first ---- */
+    id: 3, name: 'The Long Truck', par: 6,
+    map: roadMap(),
     vehicles: [
-      { id: 'forest', kind: 'van',  color: '#2f9e60', len: 3, orient: 'v', r: 8, c: 3 },
-      { id: 'ruby',   kind: 'car',  color: '#d8384f', len: 2, orient: 'v', r: 4, c: 3 },
-      { id: 'gold',   kind: 'car',  color: '#e6a417', len: 2, orient: 'v', r: 4, c: 5 },
-      { id: 'plum',   kind: 'long', color: '#8e5bc0', len: 3, orient: 'h', r: 2, c: 2 },
+      _H(8, 4, 2, 'small', '#7ac043'),            // must move before the truck can
+      _V(2, 5, 4, 'truck', '#c96f35', 'van'),
+      _H(2, 3, 2, 'd1', '#e8443a'), _H(3, 3, 2, 'd2', '#26c3d7'),
+      _H(4, 3, 2, 'd3', '#f5920b'), _H(5, 3, 2, 'd4', '#3b6fe0'),
+      _V(0, 5, 2, 'dz', '#e4b04f'),
+      _V(0, 2, 2, 'b1', '#5b8fd0'), _V(3, 2, 2, 'b2', '#c96f9f'),
+      _V(10, 2, 2, 'b3', '#4aa39a'), _V(12, 2, 2, 'b4', '#b06fd0'),
+      _V(0, 1, 2, 'b5', '#d0a24a'), _V(12, 4, 2, 'b6', '#6f8fd0'),
     ],
     spaces: [
-      { id: 'V1', r: 8, c: 0, orient: 'v', len: 3, maxLen: 3 }, // long left bay for the van
-      { id: 'A1', r: 4, c: 6, orient: 'v', len: 2, maxLen: 2 },
-      { id: 'B1', r: 1, c: 6, orient: 'v', len: 2, maxLen: 2 },
-      { id: 'C1', r: 1, c: 0, orient: 'h', len: 3, maxLen: 3 },
+      { id: 'L8', r: 8, c: 0, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'GATE', r: 9, c: 5, orient: 'v', len: 4, maxLen: 4, minLen: 3 },
+      { id: 'B1', r: 2, c: 5, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'B2', r: 3, c: 5, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'B3', r: 4, c: 5, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'B4', r: 5, c: 5, orient: 'h', len: 2, maxLen: 2 },
     ],
     ambulance: { r: 12, c: 3 },
   },
 
-  { /* ------------------------------ LEVEL 4 ------------------------------ */
-    id: 4, name: 'Tight Turn', par: 4,
-    map: [
-      '..rer..',
-      '..rer..',
-      '.prer..',
-      '.prer..',
-      '..rer..',
-      '..rer..',
-      '..rer..',
-      '..rerp.',
-      '..rerp.',
-      'tprer..',
-      '.prer..',
-      '..rer..',
-      '..rer..',
-      '..rer..',
-    ],
+  { /* ---- LEVEL 4 — move the van into a side street to unlock the gate ---- */
+    id: 4, name: 'Side Street', par: 6,
+    map: roadMap(),
     vehicles: [
-      { id: 'mint',   kind: 'car', color: '#37c9a5', len: 2, orient: 'h', r: 9, c: 2 },
-      { id: 'copper', kind: 'van', color: '#c96f35', len: 3, orient: 'h', r: 5, c: 2 },
-      { id: 'navy',   kind: 'car', color: '#33518f', len: 2, orient: 'v', r: 7, c: 3 },
-      { id: 'lemon',  kind: 'car', color: '#e3d13c', len: 2, orient: 'v', r: 2, c: 3 },
+      _H(8, 3, 3, 'mover', '#37c9a5', 'van'),     // opener: drives into the side-street bay
+      _V(2, 5, 4, 'gate', '#8a5cc0', 'van'),
+      _H(2, 3, 2, 'd1', '#e8443a'), _H(3, 3, 2, 'd2', '#26c3d7'),
+      _H(4, 3, 2, 'd3', '#f5920b'), _H(5, 3, 2, 'd4', '#3b6fe0'),
+      _V(0, 5, 2, 'dz', '#e4b04f'),
+      _V(0, 2, 2, 'b1', '#5b8fd0'), _V(2, 2, 2, 'b2', '#c96f9f'),
+      _V(5, 2, 2, 'b3', '#4aa39a'), _V(10, 2, 2, 'b4', '#b06fd0'),
+      _V(12, 2, 2, 'b5', '#d0a24a'), _V(0, 1, 2, 'b6', '#6f8fd0'),
+      _V(12, 4, 2, 'b7', '#c98f6f'), _V(10, 1, 2, 'b8', '#9fc96f'),
     ],
     spaces: [
-      { id: 'H1', r: 9, c: 0, orient: 'v', len: 2, maxLen: 2 }, // needs a 90° turn to enter
-      { id: 'W1', r: 4, c: 4, orient: 'h', len: 3, maxLen: 3 },
-      { id: 'N1', r: 7, c: 6, orient: 'v', len: 2, maxLen: 2 },
-      { id: 'L1', r: 2, c: 0, orient: 'v', len: 2, maxLen: 2 },
+      { id: 'SIDE', r: 8, c: 0, orient: 'h', len: 3, maxLen: 3, minLen: 3 },
+      { id: 'GATE', r: 9, c: 5, orient: 'v', len: 4, maxLen: 4, minLen: 3 },
+      { id: 'B1', r: 2, c: 5, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'B2', r: 3, c: 5, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'B3', r: 4, c: 5, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'B4', r: 5, c: 5, orient: 'h', len: 2, maxLen: 2 },
     ],
     ambulance: { r: 12, c: 3 },
   },
 
-  { /* ------------------------------ LEVEL 5 ------------------------------ */
-    id: 5, name: 'The Decoy', par: 3,
-    map: [
-      '..rer..',
-      '..rerp.',
-      '..rerp.',
-      '..rer..',
-      '..rer..',
-      '..rer..',
-      '.prer..',
-      '.prerp.',
-      '.prerp.',
-      '..rer..',
-      '..rerp.',
-      '..rerp.',
-      '..rer..',
-      '..rer..',
-    ],
+  { /* ---- LEVEL 5 — four-stage chain: opener -> keystone -> gate -> drain ---- */
+    id: 5, name: 'Gridlock', par: 7,
+    map: roadMap(),
     vehicles: [
-      { id: 'olive', kind: 'van',  color: '#8a9a2f', len: 3, orient: 'v', r: 7,  c: 3 },
-      { id: 'punch', kind: 'car',  color: '#ef5f7e', len: 2, orient: 'v', r: 10, c: 3 },
-      { id: 'berry', kind: 'long', color: '#5b6fd4', len: 3, orient: 'h', r: 4,  c: 2 },
-      { id: 'aqua',  kind: 'car',  color: '#3fbfc9', len: 2, orient: 'v', r: 1,  c: 4 },
+      _V(9, 5, 2, 'sK', '#7ac043'),               // only opener (slides down)
+      _H(9, 1, 3, 'key', '#e3d13c', 'van'),       // keystone: freed by sK, frees the left gate
+      _V(5, 1, 4, 'gateL', '#8a5cc0', 'van'),     // blocks four cars' left exits
+      _H(5, 2, 2, 'dl1', '#e8443a'), _H(6, 2, 2, 'dl2', '#26c3d7'),
+      _H(7, 2, 2, 'dl3', '#f5920b'), _H(8, 2, 2, 'dl4', '#3b6fe0'),
+      _V(0, 5, 2, 'dz', '#e4b04f'),
+      _V(0, 2, 2, 'b1', '#5b8fd0'), _V(2, 2, 2, 'b2', '#c96f9f'),
+      _V(0, 4, 2, 'b3', '#4aa39a'), _V(2, 4, 2, 'b4', '#b06fd0'),
+      _V(0, 1, 2, 'b5', '#d0a24a'), _V(2, 5, 2, 'b6', '#6f8fd0'),
+      _V(4, 5, 2, 'b7', '#9fc96f'), _V(6, 5, 2, 'b8', '#d06f9f'),
     ],
     spaces: [
-      { id: 'V5', r: 6,  c: 0, orient: 'v', len: 3, maxLen: 3 }, // real bay for the van
-      { id: 'D5', r: 7,  c: 6, orient: 'v', len: 2, maxLen: 2 }, // decoy: too short for the van
-      { id: 'A5', r: 10, c: 6, orient: 'v', len: 2, maxLen: 2 },
-      { id: 'B5', r: 5,  c: 0, orient: 'h', len: 3, maxLen: 3 },
-      { id: 'C5', r: 1,  c: 6, orient: 'v', len: 2, maxLen: 2 },
+      { id: 'SK', r: 11, c: 5, orient: 'v', len: 2, maxLen: 2 },
+      { id: 'KEY', r: 9, c: 4, orient: 'h', len: 3, maxLen: 3, minLen: 3 },
+      { id: 'GL', r: 9, c: 1, orient: 'v', len: 4, maxLen: 4, minLen: 3 },
+      { id: 'A1', r: 5, c: 0, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'A2', r: 6, c: 0, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'A3', r: 7, c: 0, orient: 'h', len: 2, maxLen: 2 },
+      { id: 'A4', r: 8, c: 0, orient: 'h', len: 2, maxLen: 2 },
     ],
     ambulance: { r: 12, c: 3 },
   },
@@ -730,6 +715,11 @@ class HintSystem {
       for (const b of blockers) {
         const ts = computeTargets(game.board, vehicles, game.spacesPlain(), b.v.id);
         if (ts.length) { vehicleId = b.v.id; spaceId = ts[0].spaceId; break; }
+      }
+      if (!vehicleId) {
+        // Last resort: any movable vehicle (in a chain level, often the only one).
+        const ids = movableVehicles(game.board, vehicles, game.spacesPlain());
+        if (ids.length) vehicleId = ids[0];
       }
     }
     if (!vehicleId) return null;
@@ -1288,7 +1278,7 @@ class Renderer {
       this.rr(x, y, wd, ht, cs * 0.14); ctx.stroke();
       ctx.restore();
 
-      if (!sp.occupiedBy) {
+      if (g.spaceIsFree(sp)) {
         ctx.fillStyle = 'rgba(255,255,255,0.95)';
         ctx.font = `900 ${Math.round(cs * 0.52)}px "Trebuchet MS", sans-serif`;
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -1403,12 +1393,39 @@ class Renderer {
       const selected = g.selection && g.selection.vehicleId === veh.id;
       const hinted = g.hintFx && g.hintFx.vehicleId === veh.id && g.hintFx.until > t;
       const tut = g.tutorial.active && g.tutorial.step === 0 && veh.id === g.tutorial.vehicleId;
-      this.drawVehicleBody(veh, veh.px, { selected, hinted: hinted || tut, t });
+      const movable = g.movableIds.has(veh.id);
+      this.drawVehicleBody(veh, veh.px, { selected, hinted: hinted || tut, movable, t });
     }
     this.drawAmbulance(t);
+    this.drawBlockedIcon(t);
   }
 
-  drawVehicleBody(veh, pose, { selected = false, hinted = false, ghost = false, t = 0 } = {}) {
+  /* Small "no entry" badge over a blocked car the player just tapped. */
+  drawBlockedIcon(t) {
+    const g = this.game, ctx = this.ctx, { cs } = this.view;
+    if (!g.blockedFx || g.blockedFx.until < t) return;
+    const veh = g.vehicleById(g.blockedFx.vehicleId);
+    if (!veh) return;
+    const life = (g.blockedFx.until - t) / 950;
+    const pop = Math.min(1, (1 - life) * 6);
+    const x = veh.px.x, y = veh.px.y - cs * 0.72 - (1 - life) * cs * 0.1;
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, life * 3);
+    ctx.translate(x, y);
+    ctx.scale(pop, pop);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(0, 0, cs * 0.3, 0, Math.PI * 2); ctx.fill();
+    ctx.lineWidth = cs * 0.11;
+    ctx.strokeStyle = '#e8443a';
+    ctx.beginPath(); ctx.arc(0, 0, cs * 0.24, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath();
+    const d = cs * 0.24 * Math.SQRT1_2;
+    ctx.moveTo(-d, -d); ctx.lineTo(d, d);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  drawVehicleBody(veh, pose, { selected = false, hinted = false, movable = true, ghost = false, t = 0 } = {}) {
     const ctx = this.ctx, { cs } = this.view;
     const L = veh.len * cs - cs * 0.2;
     const W = cs * 0.8;
@@ -1417,8 +1434,11 @@ class Renderer {
     if (hinted) scale = 1 + 0.035 * (0.5 + 0.5 * Math.sin(t * 0.01));
     if (veh.bounceT > 0) scale += 0.06 * Math.sin((1 - veh.bounceT) * Math.PI * 3) * veh.bounceT;
 
+    // Refused-to-move shake for blocked traffic.
+    const shakeX = veh.shakeT > 0 ? Math.sin(veh.shakeT * 34) * cs * 0.07 * veh.shakeT : 0;
+
     ctx.save();
-    ctx.translate(pose.x, pose.y - (selected ? cs * 0.08 : 0));
+    ctx.translate(pose.x + shakeX, pose.y - (selected ? cs * 0.08 : 0));
     ctx.rotate(pose.angle);
     ctx.scale(scale, scale);
 
@@ -1444,10 +1464,13 @@ class Renderer {
       }
     }
 
-    // Selection / hint glow.
+    // Selection / hint glow; movable cars get a subtle ready-to-go glow.
     if (selected || hinted) {
       ctx.shadowColor = selected ? 'rgba(255,255,255,0.95)' : 'rgba(255,201,60,0.95)';
       ctx.shadowBlur = cs * 0.5;
+    } else if (movable && !ghost) {
+      ctx.shadowColor = `rgba(170,255,205,${0.55 + 0.25 * Math.sin(t * 0.006)})`;
+      ctx.shadowBlur = cs * 0.3;
     }
 
     // Body with a top-lit candy gradient.
@@ -1527,6 +1550,23 @@ class Renderer {
     ctx.fillStyle = '#ff6459';
     this.rr(-L / 2 + cs * 0.02, -W * 0.34, cs * 0.06, W * 0.18, cs * 0.02); ctx.fill();
     this.rr(-L / 2 + cs * 0.02, W * 0.16, cs * 0.06, W * 0.18, cs * 0.02); ctx.fill();
+
+    // Blocked traffic sits darker so the movable car stands out.
+    if (!movable && !ghost && !selected) {
+      ctx.fillStyle = 'rgba(22,30,44,0.30)';
+      this.rr(-L / 2, -W / 2, L, W, rad);
+      ctx.fill();
+    }
+
+    // Freshly unlocked: a bright expanding ring.
+    if (veh.unlockT > 0 && !ghost) {
+      const u = 1 - veh.unlockT;
+      ctx.strokeStyle = `rgba(255,235,140,${veh.unlockT})`;
+      ctx.lineWidth = cs * 0.09;
+      this.rr(-L / 2 - u * cs * 0.35, -W / 2 - u * cs * 0.35,
+              L + u * cs * 0.7, W + u * cs * 0.7, rad + u * cs * 0.35);
+      ctx.stroke();
+    }
 
     ctx.restore();
   }
@@ -1838,6 +1878,8 @@ class Game {
     this.drag = null;        // { vehicleId, target|null }
     this.hintFx = null;      // { vehicleId, spaceId, path, until }
     this.flashFx = null;     // { spaceId, until }
+    this.blockedFx = null;   // { vehicleId, until } — "blocked" icon over a tapped car
+    this.movableIds = new Set(); // ids of vehicles that currently have a destination
     this.hintsLeft = TUNE.freeHints;
     this.shakeUntil = 0;
     this.routeGlowUntil = 0;
@@ -1889,6 +1931,21 @@ class Game {
   }
   spacesPlain() { return this.spaces; }
 
+  /** Recompute which vehicles currently have a reachable destination. */
+  refreshMovable() {
+    this.movableIds = new Set(movableVehicles(this.board, this.allObstacles(), this.spaces));
+  }
+
+  /** A space is free when no vehicle currently overlaps any of its cells. */
+  spaceIsFree(sp) {
+    const cells = spaceCells(sp);
+    for (const v of this.vehicles) {
+      if (footprint(v.r, v.c, v.orient, v.len)
+          .some(([r, c]) => cells.some(([sr, sc]) => sr === r && sc === c))) return false;
+    }
+    return true;
+  }
+
   vehicleAtCell(r, c) {
     return this.vehicles.find(v =>
       footprint(v.r, v.c, v.orient, v.len).some(([fr, fc]) => fr === r && fc === c));
@@ -1906,31 +1963,24 @@ class Game {
     this.levelIndex = idx;
     this.board = parseBoard(def);
     this.vehicles = def.vehicles.map(v => ({
-      ...v, spaceId: null, bounceT: 0,
+      ...v, spaceId: null, bounceT: 0, shakeT: 0, unlockT: 0,
       px: { x: 0, y: 0, angle: 0 },
     }));
     this.ambulance = {
       id: AMB_ID, r: def.ambulance.r, c: def.ambulance.c, orient: 'v', len: 2,
       lights: false, px: { x: 0, y: 0, angle: 0 },
     };
-    this.spaces = def.spaces.map(s => ({ ...s, occupiedBy: null }));
-    // Mark spaces already covered by a vehicle (not the case in shipped levels,
-    // but keeps the model correct for future content).
-    for (const sp of this.spaces) {
-      const cells = spaceCells(sp);
-      for (const v of this.vehicles) {
-        if (footprint(v.r, v.c, v.orient, v.len)
-            .some(([r, c]) => cells.some(([sr, sc]) => sr === r && sc === c))) {
-          sp.occupiedBy = v.id;
-        }
-      }
-    }
+    // Space occupancy is always COMPUTED from vehicle positions (see
+    // computeTargets); nothing is cached here. That lets levels start with
+    // gate cars double-parked across bay mouths — the heart of the chain puzzle.
+    this.spaces = def.spaces.map(s => ({ ...s }));
     this.moves = 0;
     this.history.clear();
     this.selection = null;
     this.drag = null;
     this.hintFx = null;
     this.flashFx = null;
+    this.blockedFx = null;
     this.hintsLeft = TUNE.freeHints;
     this.shakeUntil = 0;
     this.routeGlowUntil = 0;
@@ -1939,13 +1989,17 @@ class Game {
     this.buildDecor(def);
     this.renderer.groundDirty = true; // new board + decor -> repaint scenery cache
     this.syncAllPoses();
+    this.refreshMovable();
 
-    // Tutorial on first ever play of level 1.
-    this.tutorial = { active: false, step: -1, vehicleId: 'orange', spaceId: 'P3' };
+    // Tutorial on first ever play (the level definition names the one car
+    // that can move first, so the tutorial always points at the real opener).
+    this.tutorial = { active: false, step: -1, vehicleId: null, spaceId: null };
     if (def.tutorial && !this.save.data.tutorialDone) {
       this.tutorial.active = true;
       this.tutorial.step = 0;
-      this.ui.tutorial('Move vehicles into empty parking spaces. Start with the ORANGE van — drive it into the glowing bay!');
+      this.tutorial.vehicleId = def.tutorial.vehicleId;
+      this.tutorial.spaceId = def.tutorial.spaceId;
+      this.ui.tutorial(def.tutorial.intro);
     } else {
       this.ui.tutorial(null);
     }
@@ -2006,16 +2060,24 @@ class Game {
   /* ------------------------------ selection ------------------------------ */
   select(vehicleId) {
     if (!this.inputAllowed()) return;
-    if (this.tutorial.active && this.tutorial.step === 0 && vehicleId !== this.tutorial.vehicleId) {
-      this.ui.toast('Move the ORANGE van first!', 1100);
+    const veh = this.vehicleById(vehicleId);
+
+    // Blocked traffic cannot be selected: shake it and show the blocked icon.
+    const targets = computeTargets(this.board, this.allObstacles(), this.spaces, vehicleId);
+    if (!targets.length) {
+      veh.shakeT = 1;
+      this.blockedFx = { vehicleId, until: this.now + 950 };
       this.audio.invalid();
       return;
     }
-    const targets = computeTargets(this.board, this.allObstacles(), this.spaces, vehicleId);
+    if (this.tutorial.active && this.tutorial.step === 0 && vehicleId !== this.tutorial.vehicleId) {
+      this.ui.toast('Only the glowing car can move first!', 1100);
+      this.audio.invalid();
+      return;
+    }
     this.selection = { vehicleId, targets: new Map(targets.map(t => [t.spaceId, t])) };
     this.setState('selected');
     this.audio.select();
-    if (!targets.length) this.ui.toast('No free space reachable!', 1100);
   }
 
   deselect() {
@@ -2085,14 +2147,8 @@ class Game {
 
     this.animator.animate(veh, target.path.map(s => ({ ...s })), () => {
       // Apply the move to the logical model.
-      if (veh.spaceId) {
-        const old = this.spaceById(veh.spaceId);
-        if (old) old.occupiedBy = null;
-      }
       veh.r = target.r; veh.c = target.c; veh.orient = target.orient;
       veh.spaceId = target.spaceId;
-      const sp = this.spaceById(target.spaceId);
-      if (sp) sp.occupiedBy = veh.id;
       veh.bounceT = 1;
 
       this.moves++;
@@ -2102,12 +2158,24 @@ class Game {
       this.audio.park();
       this.particles.sparkle(veh.px.x, veh.px.y, 10);
 
+      // Chain reaction: find vehicles this move just unlocked and celebrate them.
+      const before = this.movableIds;
+      this.refreshMovable();
+      for (const id of this.movableIds) {
+        if (before.has(id) || id === veh.id) continue;
+        const nv = this.vehicleById(id);
+        if (nv) {
+          nv.unlockT = 1;
+          this.particles.sparkle(nv.px.x, nv.px.y, 16);
+        }
+      }
+
       // Tutorial advances after the first parked vehicle.
       if (this.tutorial.active && this.tutorial.step === 0) {
         this.tutorial.step = 1;
-        this.ui.tutorial('Every vehicle needs enough room. Clear the red emergency lane so the ambulance can pass!');
+        this.ui.tutorial('It worked! Each move unlocks the next car — find the new glowing car and keep the chain going.');
         this.routeGlowUntil = this.now + 2600;
-        setTimeout(() => { if (this.tutorial.active) this.ui.tutorial(null); }, 4200);
+        setTimeout(() => { if (this.tutorial.active) this.ui.tutorial(null); }, 4600);
       }
 
       this.checkRoute();
@@ -2209,16 +2277,11 @@ class Game {
 
     const reversed = rec.path.slice().reverse().map(s => ({ ...s }));
     this.animator.animate(veh, reversed, () => {
-      // Restore exact previous logical state.
-      const toSp = this.spaceById(rec.to.spaceId);
-      if (toSp) toSp.occupiedBy = null;
+      // Restore exact previous logical state (occupancy is recomputed).
       veh.r = rec.from.r; veh.c = rec.from.c; veh.orient = rec.from.orient;
       veh.spaceId = rec.from.spaceId;
-      if (rec.from.spaceId) {
-        const fromSp = this.spaceById(rec.from.spaceId);
-        if (fromSp) fromSp.occupiedBy = veh.id;
-      }
       this.moves = rec.prevMoves;
+      this.refreshMovable();
       this.ui.updateHUD(this.levelDef().id, this.moves, this.levelDef().par, this.save.data.coins);
       this.ui.updateUndo(this.history.length > 0);
       this.audio.undo();
@@ -2350,8 +2413,11 @@ class Game {
     this.particles.update(dt);
     for (const v of this.vehicles) {
       if (v.bounceT > 0) v.bounceT = Math.max(0, v.bounceT - dt * 2.4);
+      if (v.shakeT > 0) v.shakeT = Math.max(0, v.shakeT - dt * 2.8);
+      if (v.unlockT > 0) v.unlockT = Math.max(0, v.unlockT - dt * 1.1);
     }
     if (this.hintFx && this.hintFx.until < t) this.hintFx = null;
+    if (this.blockedFx && this.blockedFx.until < t) this.blockedFx = null;
     this.renderer.draw(t, dt);
   }
 
@@ -2375,7 +2441,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     ROWS, COLS, TILE, TUNE, AMB_ID,
     parseBoard, footprint, spaceCells, buildOcc,
-    Pathfinder, computeTargets, routeIsClear, solveLevel, validateLevel,
+    Pathfinder, computeTargets, movableVehicles, routeIsClear, solveLevel, validateLevel,
     LEVELS,
   };
 }
