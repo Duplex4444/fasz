@@ -64,12 +64,28 @@ layered dependencies (not one repeated trick), and progressive relaxation keeps
 the success rate at ~100% without ever shipping an unsolvable board. Same seed →
 same map, so any puzzle is reproducible.
 
+## Garage, skins & coins (demo economy)
+
+The **🛒 Garage & Shop** on the menu lets you spend coins on **ambulance skins**
+(Classic, Midnight, Ranger, Candy, Shadow, Golden) — each is a procedurally
+drawn palette, no assets. You earn coins by clearing levels, by **watching a
+(simulated) rewarded ad** for free coins, or via **coin packs**. A rewarded-ad
+offer also pops up periodically (every 5 minutes, at a calm moment) for bonus
+coins. Owned skins, the equipped skin, and coins persist in `localStorage`.
+
+> **Note:** this is an offline prototype — there is **no ad network and no
+> payment processor**. The ad player and coin packs are clearly labelled
+> *demo* and simply grant coins; nothing is ever charged. Wiring in a real
+> rewarded-ad SDK or store would replace `Game.watchAd` / `Game.buyCoins`.
+
 ## Features
 
 - 5 chain-reaction campaign levels, each proven by an automated solver to start
   with exactly one movable car and to be solvable only in the correct order
 - Endless mode: an infinite supply of backward-generated, always-solvable,
   varied puzzles with a difficulty ramp and saved best round
+- Garage with buyable ambulance skins, a simulated rewarded-ad flow, coin
+  packs, and a periodic ad offer (all clearly demo — no real charges)
 - Grid-based BFS pathfinding: cars drive along their heading (no crab-slides),
   plus 90° rotations in turning zones
 - Real undo history, chain-aware hints, stars/coins, `localStorage` saves

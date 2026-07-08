@@ -70,6 +70,7 @@
       <p class="tagline">Park the traffic. Save a life.</p>
       <div id="levelGrid" class="level-grid"></div>
       <button id="btnEndless" class="panel-btn endless-btn">∞ ENDLESS</button>
+      <button id="btnShop" class="panel-btn shop-btn">🛒 GARAGE &amp; SHOP</button>
       <div class="menu-row">
         <button id="btnMenuSound" class="panel-btn small">SOUND: ON</button>
         <button id="btnMenuTutorial" class="panel-btn small">TUTORIAL</button>
@@ -80,6 +81,50 @@
       <h2 id="confirmText">Restart this level?</h2>
       <button id="btnConfirmYes" class="panel-btn primary">YES</button>
       <button id="btnConfirmNo" class="panel-btn">CANCEL</button>
+    </div>
+
+    <!-- Shop: ambulance skins, coin packs, rewarded ad -->
+    <div id="panelShop" class="panel shop-panel hidden">
+      <div class="shop-head">
+        <h2>GARAGE</h2>
+        <div class="hud-pill coin-pill"><span class="coin"></span><span id="shopCoins">0</span></div>
+      </div>
+      <p class="shop-sub">Tap a skin to equip it, or buy with coins.</p>
+      <div id="skinGrid" class="skin-grid"></div>
+      <button id="btnWatchAd" class="panel-btn ad-btn">▶ WATCH AD — FREE COINS</button>
+      <p class="shop-sub">Get coins <em>(demo — no real charge)</em></p>
+      <div id="shopPacks" class="pack-row">
+        <button class="pack-btn" data-coins="100" data-label="Handful">🪙100<span>$0.99</span></button>
+        <button class="pack-btn" data-coins="350" data-label="Stack">🪙350<span>$2.99</span></button>
+        <button class="pack-btn" data-coins="1000" data-label="Vault">🪙1000<span>$6.99</span></button>
+      </div>
+      <button id="btnShopClose" class="panel-btn">BACK</button>
+    </div>
+
+    <!-- Simulated rewarded-ad player -->
+    <div id="panelAd" class="panel ad-panel hidden">
+      <div class="ad-badge">DEMO AD</div>
+      <div class="ad-screen">
+        <div class="ad-glow"></div>
+        <div class="ad-copy">
+          <div class="ad-logo">🚑</div>
+          <div class="ad-title">CLEAR THE WAY</div>
+          <div class="ad-sub" id="adReason">Reward</div>
+        </div>
+        <div class="ad-count" id="adCount">5s</div>
+      </div>
+      <div class="ad-reward">Reward: <b id="adReward">+40 coins</b></div>
+      <button id="adClaim" class="panel-btn primary hidden">CLAIM REWARD</button>
+      <button id="adSkip" class="panel-btn hidden">SKIP &amp; CLAIM</button>
+    </div>
+
+    <!-- Periodic rewarded-ad offer -->
+    <div id="panelAdOffer" class="panel hidden">
+      <div class="offer-gift">🎁</div>
+      <h2>FREE COINS!</h2>
+      <p class="shop-sub">Watch a short ad for <b id="adOfferReward">+40 coins</b>.</p>
+      <button id="btnAdOfferWatch" class="panel-btn primary">▶ WATCH NOW</button>
+      <button id="btnAdOfferSkip" class="panel-btn">NO THANKS</button>
     </div>
 
   </div>

@@ -32,9 +32,25 @@ const TUNE = {
   tapSlopPx:    12,           // movement below this is a tap, above is a drag
   hintShowMs:   4500,
   solverMaxDepth: 14,         // longest chain (level 5) is 11 moves
+  adOfferMs:    5 * 60 * 1000, // rewarded-ad offer cadence (every 5 minutes)
+  adOfferReward: 40,          // coins for watching the periodic offer
+  adWatchSecs:  5,            // simulated ad duration before you can claim
 };
 
 const AMB_ID = '__amb';
+
+/* Ambulance skins for the shop. `cost` is in coins (0 = owned by default);
+   `body` is the [top, bottom] gradient. Everything is drawn procedurally, so
+   a skin is just a palette — no assets. */
+const SKINS = [
+  { id: 'classic',  name: 'Classic',  cost: 0,   body: ['#ffffff', '#ccd5df'], stripe: '#e8443a', accent: '#ffb42e', cross: '#e8443a' },
+  { id: 'midnight', name: 'Midnight', cost: 120, body: ['#46587a', '#26324a'], stripe: '#37c9d7', accent: '#7ad0ff', cross: '#37c9d7' },
+  { id: 'ranger',   name: 'Ranger',   cost: 180, body: ['#69b455', '#37732c'], stripe: '#ffd75e', accent: '#fff2a8', cross: '#ffffff' },
+  { id: 'candy',    name: 'Candy',    cost: 240, body: ['#ff9ec4', '#e46fae'], stripe: '#ffffff', accent: '#fff2a8', cross: '#e8443a' },
+  { id: 'shadow',   name: 'Shadow',   cost: 320, body: ['#3a4150', '#1c212c'], stripe: '#ff6a3d', accent: '#ff6a3d', cross: '#ff6a3d' },
+  { id: 'gold',     name: 'Golden',   cost: 600, body: ['#ffe38a', '#e0a419'], stripe: '#7a4a12', accent: '#fff6c8', cross: '#a5670c' },
+];
+const skinById = id => SKINS.find(s => s.id === id) || SKINS[0];
 
 /* ============================== UTILITIES ================================= */
 
@@ -742,6 +758,9 @@ class SaveManager {
       sound: true,
       tutorialDone: false,
       endlessBest: 0,              // highest Endless round reached
+      ownedSkins: ['classic'],    // skin ids the player owns
+      skin: 'classic',            // equipped ambulance skin
+      adsRemoved: false,          // "remove ads" purchase (demo)
     };
     this.load();
   }
@@ -750,6 +769,10 @@ class SaveManager {
       const raw = localStorage.getItem(this.key);
       if (raw) Object.assign(this.data, JSON.parse(raw));
     } catch (e) { /* private mode etc. */ }
+    // Normalise: the default skin is always owned and equipped skin must exist.
+    if (!Array.isArray(this.data.ownedSkins)) this.data.ownedSkins = ['classic'];
+    if (!this.data.ownedSkins.includes('classic')) this.data.ownedSkins.unshift('classic');
+    if (!this.data.ownedSkins.includes(this.data.skin)) this.data.skin = 'classic';
   }
   save() {
     try { localStorage.setItem(this.key, JSON.stringify(this.data)); } catch (e) { /* ignore */ }
@@ -884,8 +907,14 @@ class UIManager {
       statCoins: $('statCoins'), btnNext: $('btnNext'), btnReplay: $('btnReplay'),
       btnCompleteMenu: $('btnCompleteMenu'),
       levelGrid: $('levelGrid'), btnMenuSound: $('btnMenuSound'),
-      btnMenuTutorial: $('btnMenuTutorial'), btnEndless: $('btnEndless'),
+      btnMenuTutorial: $('btnMenuTutorial'), btnEndless: $('btnEndless'), btnShop: $('btnShop'),
       confirmText: $('confirmText'), btnConfirmYes: $('btnConfirmYes'), btnConfirmNo: $('btnConfirmNo'),
+      panelShop: $('panelShop'), shopCoins: $('shopCoins'), skinGrid: $('skinGrid'),
+      btnWatchAd: $('btnWatchAd'), shopPacks: $('shopPacks'), btnShopClose: $('btnShopClose'),
+      panelAd: $('panelAd'), adReason: $('adReason'), adReward: $('adReward'),
+      adCount: $('adCount'), adSkip: $('adSkip'), adClaim: $('adClaim'),
+      panelAdOffer: $('panelAdOffer'), adOfferReward: $('adOfferReward'),
+      btnAdOfferWatch: $('btnAdOfferWatch'), btnAdOfferSkip: $('btnAdOfferSkip'),
     };
     this.toastTimer = null;
     this.confirmCb = null;
@@ -917,7 +946,8 @@ class UIManager {
     this.el.tutorialBox.classList.remove('hidden');
   }
   hideAllPanels() {
-    for (const p of [this.el.panelPause, this.el.panelComplete, this.el.panelMenu, this.el.panelConfirm]) {
+    for (const p of [this.el.panelPause, this.el.panelComplete, this.el.panelMenu, this.el.panelConfirm,
+                     this.el.panelShop, this.el.panelAd, this.el.panelAdOffer]) {
       p.classList.add('hidden');
     }
     this.el.overlay.classList.add('hidden');
@@ -944,8 +974,9 @@ class UIManager {
     this.el.btnNext.textContent = endless ? 'NEXT MAP' : isLast ? 'MAIN MENU' : 'NEXT LEVEL';
     this.showPanel(this.el.panelComplete);
   }
-  showMenu(save, levels, onPick, soundOn, onEndless) {
+  showMenu(save, levels, onPick, soundOn, onEndless, onShop) {
     this.el.btnMenuSound.textContent = 'SOUND: ' + (soundOn ? 'ON' : 'OFF');
+    this.el.btnShop.onclick = onShop;
     const grid = this.el.levelGrid;
     grid.innerHTML = '';
     levels.forEach((lv, i) => {
@@ -969,10 +1000,73 @@ class UIManager {
     eb.onclick = onEndless;
     this.showPanel(this.el.panelMenu);
   }
-  confirm(text, cb) {
+  confirm(text, cb, cancelCb) {
     this.el.confirmText.textContent = text;
     this.confirmCb = cb;
+    this.confirmCancelCb = cancelCb || null;
     this.showPanel(this.el.panelConfirm);
+  }
+
+  /* ---- shop: ambulance skins + coin packs + rewarded ad ---- */
+  showShop(save, skins, cb) {
+    this.el.shopCoins.textContent = save.data.coins;
+    const grid = this.el.skinGrid;
+    grid.innerHTML = '';
+    for (const skin of skins) {
+      const owned = save.data.ownedSkins.includes(skin.id);
+      const equipped = save.data.skin === skin.id;
+      const cell = document.createElement('div');
+      cell.className = 'skin-cell' + (equipped ? ' equipped' : '');
+      cell.innerHTML =
+        `<div class="skin-amb" style="--b0:${skin.body[0]};--b1:${skin.body[1]};--st:${skin.stripe};--cr:${skin.cross}">
+           <span class="skin-cross"></span></div>
+         <div class="skin-name">${skin.name}</div>
+         <button class="skin-btn ${equipped ? 'is-equipped' : owned ? 'is-owned' : 'is-buy'}">${
+           equipped ? 'EQUIPPED' : owned ? 'EQUIP' : '🪙 ' + skin.cost}</button>`;
+      const btn = cell.querySelector('.skin-btn');
+      if (!equipped) btn.addEventListener('click', () => owned ? cb.onEquip(skin.id) : cb.onBuy(skin.id));
+      grid.appendChild(cell);
+    }
+    this.el.btnWatchAd.onclick = cb.onWatchAd;
+    this.el.shopPacks.querySelectorAll('[data-coins]').forEach(b => {
+      b.onclick = () => cb.onPack(parseInt(b.dataset.coins, 10), b.dataset.label || '');
+    });
+    this.el.btnShopClose.onclick = cb.onClose;
+    this.showPanel(this.el.panelShop);
+  }
+
+  /* ---- simulated rewarded ad player ---- */
+  playAd(reward, reason, onReward) {
+    clearInterval(this._adInt);
+    const panel = this.el.panelAd;
+    let left = TUNE.adWatchSecs;
+    const skip = this.el.adSkip, claim = this.el.adClaim, count = this.el.adCount;
+    this.el.adReason.textContent = reason || 'Reward';
+    this.el.adReward.textContent = '+' + reward + ' coins';
+    claim.classList.add('hidden');
+    skip.classList.add('hidden');
+    count.textContent = left + 's';
+    this.showPanel(panel);
+    const tick = () => {
+      left--;
+      count.textContent = left > 0 ? left + 's' : '';
+      if (left <= 0) {
+        clearInterval(this._adInt);
+        claim.classList.remove('hidden');
+        skip.classList.remove('hidden');
+      }
+    };
+    this._adInt = setInterval(tick, 1000);
+    claim.onclick = () => { clearInterval(this._adInt); this.hideAllPanels(); onReward(); };
+    skip.onclick = () => { clearInterval(this._adInt); this.hideAllPanels(); onReward(); };
+  }
+
+  /* ---- periodic rewarded-ad offer ---- */
+  showAdOffer(reward, cb) {
+    this.el.adOfferReward.textContent = '+' + reward + ' coins';
+    this.el.btnAdOfferWatch.onclick = cb.onWatch;
+    this.el.btnAdOfferSkip.onclick = cb.onSkip;
+    this.showPanel(this.el.panelAdOffer);
   }
 }
 
@@ -1724,6 +1818,7 @@ class Renderer {
     const W = cs * 0.86;
     const on = amb.lights;
     const phase = Math.floor(t / 130) % 2 === 0;
+    const skin = g.currentSkin();
 
     ctx.save();
     ctx.translate(pose.x, pose.y);
@@ -1745,31 +1840,31 @@ class Renderer {
       }
     }
 
-    // White body.
+    // Body (skin-tinted gradient).
     const grad = ctx.createLinearGradient(0, -W / 2, 0, W / 2);
-    grad.addColorStop(0, '#ffffff');
-    grad.addColorStop(0.6, '#f2f5f9');
-    grad.addColorStop(1, '#ccd5df');
+    grad.addColorStop(0, skin.body[0]);
+    grad.addColorStop(0.6, this.lighten(skin.body[1], 0.12));
+    grad.addColorStop(1, skin.body[1]);
     ctx.fillStyle = grad;
     this.rr(-L / 2, -W / 2, L, W, cs * 0.2); ctx.fill();
     ctx.lineWidth = Math.max(1.5, cs * 0.05);
-    ctx.strokeStyle = '#8d9aa9';
+    ctx.strokeStyle = this.lighten(skin.body[1], -0.28);
     this.rr(-L / 2, -W / 2, L, W, cs * 0.2); ctx.stroke();
 
-    // Red side stripes + orange tail block.
-    ctx.fillStyle = '#e8443a';
+    // Side stripes + tail accent block (skin colours).
+    ctx.fillStyle = skin.stripe;
     ctx.fillRect(-L / 2 + cs * 0.08, -W / 2 + cs * 0.055, L - cs * 0.3, cs * 0.09);
     ctx.fillRect(-L / 2 + cs * 0.08, W / 2 - cs * 0.145, L - cs * 0.3, cs * 0.09);
-    ctx.fillStyle = '#ffb42e';
+    ctx.fillStyle = skin.accent;
     ctx.fillRect(-L / 2 + cs * 0.04, -W * 0.3, cs * 0.07, W * 0.6);
 
     // Roof module with the medical cross.
-    ctx.fillStyle = '#f7fafc';
+    ctx.fillStyle = this.lighten(skin.body[0], 0.12);
     this.rr(-L * 0.44, -W * 0.35, L * 0.6, W * 0.7, cs * 0.12); ctx.fill();
     ctx.strokeStyle = 'rgba(0,0,0,0.12)';
     ctx.lineWidth = Math.max(1, cs * 0.03);
     this.rr(-L * 0.44, -W * 0.35, L * 0.6, W * 0.7, cs * 0.12); ctx.stroke();
-    ctx.fillStyle = '#e8443a';
+    ctx.fillStyle = skin.cross;
     const cw = W * 0.34, ct2 = W * 0.115, ccx = -L * 0.14;
     this.rr(ccx - cw / 2, -ct2 / 2, cw, ct2, ct2 * 0.3); ctx.fill();
     this.rr(ccx - ct2 / 2, -cw / 2, ct2, cw, ct2 * 0.3); ctx.fill();
@@ -2056,6 +2151,7 @@ class Game {
     // Start on the first level the player has not beaten yet.
     const start = clamp(this.save.data.unlocked - 1, 0, LEVELS.length - 1);
     this.loadLevel(start);
+    this.startAdOffers();
 
     const loop = t => {
       const dt = Math.min(0.05, (t - (this._lt || t)) / 1000);
@@ -2544,7 +2640,99 @@ class Game {
     this.ui.showMenu(this.save, LEVELS, i => {
       this.audio.click();
       this.loadLevel(i);
-    }, this.save.data.sound, () => { this.audio.click(); this.startEndless(); });
+    }, this.save.data.sound, () => { this.audio.click(); this.startEndless(); },
+    () => { this.audio.click(); this.openShop(); });
+  }
+
+  /* ------------------------------ economy / shop ------------------------- */
+  currentSkin() { return skinById(this.save.data.skin); }
+
+  grantCoins(n) {
+    this.save.data.coins += n;
+    this.save.save();
+    this.ui.updateHUD(this.hudLabel(), this.moves, this.levelDef() ? this.levelDef().par : 0, this.save.data.coins);
+  }
+
+  openShop() {
+    if (this.inputAllowed()) this.setState('paused');
+    this.refreshShop();
+  }
+  refreshShop() {
+    this.ui.showShop(this.save, SKINS, {
+      onBuy: id => this.buySkin(id),
+      onEquip: id => this.equipSkin(id),
+      onWatchAd: () => this.watchAd(30, 'Free coins', () => this.refreshShop()),
+      onPack: (coins, label) => this.buyCoins(coins, label),
+      onClose: () => { this.audio.click(); this.showMenu(); },
+    });
+  }
+
+  buySkin(id) {
+    const skin = skinById(id);
+    if (this.save.data.ownedSkins.includes(id)) { this.equipSkin(id); return; }
+    if (this.save.data.coins < skin.cost) {
+      this.ui.toast('Not enough coins — earn more!', 1300);
+      this.audio.invalid();
+      return;
+    }
+    this.save.data.coins -= skin.cost;
+    this.save.data.ownedSkins.push(id);
+    this.save.data.skin = id;
+    this.save.save();
+    this.audio.park();
+    this.ui.toast(skin.name + ' unlocked!', 1300);
+    this.refreshShop();
+  }
+  equipSkin(id) {
+    if (!this.save.data.ownedSkins.includes(id)) return;
+    this.save.data.skin = id;
+    this.save.save();
+    this.audio.select();
+    this.refreshShop();
+  }
+
+  /** Simulated coin-pack "purchase" (demo — no real payment processor). */
+  buyCoins(amount, label) {
+    this.ui.confirm(`Get the ${label} pack (${amount} coins)?\n(demo — no real charge)`, () => {
+      this.grantCoins(amount);
+      this.audio.complete();
+      this.ui.toast('+' + amount + ' coins!', 1200);
+      this.refreshShop();
+    }, () => this.refreshShop());
+  }
+
+  /** Simulated rewarded ad: play a fake ad, then grant the reward. */
+  watchAd(reward, reason, afterCb) {
+    this.ui.playAd(reward, reason, () => {
+      this.grantCoins(reward);
+      this.audio.complete();
+      this.ui.toast('+' + reward + ' coins!', 1300);
+      if (afterCb) afterCb();
+    });
+  }
+
+  /* Rewarded-ad offer that appears every few minutes at a safe moment. */
+  startAdOffers() {
+    if (this._adTimer) return;
+    this._adPending = false;
+    this._adTimer = setInterval(() => {
+      if (this.save.data.adsRemoved) return;
+      this._adPending = true;
+      this.tryShowAdOffer();
+    }, TUNE.adOfferMs);
+  }
+  tryShowAdOffer() {
+    // Only interrupt at a calm moment: waiting, no other panel/animation.
+    if (!this._adPending) return;
+    if (this.state !== 'waiting' || this.animator.busy) return;
+    if (!this.ui.el.overlay.classList.contains('hidden')) return;
+    this._adPending = false;
+    this.setState('paused');
+    this.ui.showAdOffer(TUNE.adOfferReward, {
+      onWatch: () => this.watchAd(TUNE.adOfferReward, 'Bonus coins',
+        () => { this.ui.hideAllPanels(); this.setState('waiting'); }),
+      onSkip: () => { this.audio.click(); this.ui.hideAllPanels(); this.setState('waiting'); },
+    });
   }
 
   /* ------------------------------- UI wiring ----------------------------- */
@@ -2589,8 +2777,10 @@ class Game {
       if (cb) cb();
     }));
     el.btnConfirmNo.addEventListener('click', click(() => {
-      ui.confirmCb = null;
+      const cancel = ui.confirmCancelCb;
+      ui.confirmCb = null; ui.confirmCancelCb = null;
       ui.hideAllPanels();
+      if (cancel) { cancel(); return; }
       if (this.state === 'paused' && !this._menuOpen) this.setState('waiting');
     }));
 
@@ -2614,6 +2804,7 @@ class Game {
     }
     if (this.hintFx && this.hintFx.until < t) this.hintFx = null;
     if (this.blockedFx && this.blockedFx.until < t) this.blockedFx = null;
+    if (this._adPending) this.tryShowAdOffer();   // fire the offer at a calm moment
     this.renderer.draw(t, dt);
   }
 
