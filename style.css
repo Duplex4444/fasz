@@ -138,6 +138,7 @@ html,body{
   text-align:center;
   box-shadow:0 8px 22px rgba(0,0,0,.4);
   z-index:9;
+  pointer-events:none;   /* never intercept taps meant for the board below it */
   animation:bubbleIn .35s cubic-bezier(.2,1.5,.4,1);
 }
 #tutorialBox::after{

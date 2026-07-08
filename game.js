@@ -503,164 +503,97 @@ function validateLevel(def) {
     }
   }
 
-  // The definitive tests: chain-puzzle structure + an actual solver run.
+  // The definitive tests: choice-puzzle structure + an actual solver run.
   let solution = null;
   let startMovable = [];
   if (!errors.length) {
     if (routeIsClear(board, vehicles)) errors.push('emergency route is already clear at level start');
     startMovable = movableVehicles(board, vehicles, def.spaces);
-    if (startMovable.length !== 1) {
-      errors.push(`level must start with exactly 1 movable vehicle, found ${startMovable.length}` +
+    // A real logic puzzle offers a choice: 2-4 legal moves at the start.
+    if (startMovable.length < 2 || startMovable.length > 4) {
+      errors.push(`level must start with 2-4 movable vehicles, found ${startMovable.length}` +
         (startMovable.length ? ` (${startMovable.join(', ')})` : ''));
     }
-    solution = solveLevel(board, vehicles, def.spaces, Math.max(TUNE.solverMaxDepth, def.par + 2));
+    const depth = Math.max(TUNE.solverMaxDepth, def.par + 4);
+    solution = solveLevel(board, vehicles, def.spaces, depth);
     if (!solution) errors.push('level is NOT solvable (solver found no solution)');
-    else if (solution.length !== def.par) {
-      warnings.push(`par is ${def.par} but the optimal solution takes ${solution.length} moves`);
+    else {
+      if (solution.length !== def.par) {
+        warnings.push(`par is ${def.par} but the optimal solution takes ${solution.length} moves`);
+      }
+      // At least one legal first move must be a decoy (trap or wasteful), and
+      // at least one must be good — otherwise there is no decision to make.
+      let good = 0, decoy = 0;
+      for (const id of startMovable) {
+        for (const t of computeTargets(board, vehicles, def.spaces, id)) {
+          const vs2 = vehicles.map(v => v.id === id ? { ...v, r: t.r, c: t.c, orient: t.orient } : v);
+          if (routeIsClear(board, vs2)) { good++; continue; }
+          const sub = solveLevel(board, vs2, def.spaces, depth);
+          if (!sub) decoy++;                              // trap
+          else if (1 + sub.length > solution.length) decoy++; // wastes a move
+          else good++;                                   // optimal
+        }
+      }
+      if (decoy < 1) errors.push('level has no decoy move (every legal move is optimal)');
+      if (good < 1) errors.push('level has no good move among the legal choices');
     }
   }
   return { ok: errors.length === 0, errors, warnings, solution, startMovable };
 }
 
 /* -------------------------------- LEVELS ---------------------------------
-   Chain-reaction traffic puzzles. Grid: 14 rows (0 = top) x 7 cols.
+   Choice-driven traffic puzzles. Grid: 14 rows (0 = top) x 7 cols.
    Drivable road = cols 1-5, emergency route = col 3 (marked 'e').
    Map chars: '.' grass  'r' road  'e' route  't' turning zone  'p' pavement.
-   Parking-space cells become drivable automatically; a space with minLen is a
-   long bay reserved for long vehicles (van/truck). Vehicle anchor = top-left.
+   Parking-space cells become drivable automatically. Vehicle anchor = top-left.
 
-   Every board is a dense jam where ONLY ONE vehicle can move at the start.
-   Moving it opens room for the next, so the level unravels as a chain:
-   opener -> gate -> the blocked cars drain into their bays -> ambulance exits.
-   Each level is proven by validateLevel(): exactly-1-movable-at-start,
-   route-blocked-at-start, and solvable (see test.js). */
+   These are NOT one-mover chains. Each level starts with 2-4 legally movable
+   vehicles, but only some moves are strategically good — others are decoys
+   that waste a bay, block a later car, or trap the player into an Undo. A small
+   car fits a long bay, so parking it there too early can strand a van/truck.
+   Every board is built and proven by the generator + analyzer: solvable,
+   2-4 movable at start, at least one decoy move, and a real decision to make
+   (see test.js). */
 
 const ROAD_ROW = '.rrerr.';                  // cols 1-5 drivable, col 3 = route
 const roadMap = () => Array.from({ length: ROWS }, () => ROAD_ROW);
-const _V = (r, c, len, id, color, kind = 'car') => ({ id, kind, color, len, orient: 'v', r, c });
-const _H = (r, c, len, id, color, kind = 'car') => ({ id, kind, color, len, orient: 'h', r, c });
 
 const LEVELS = [
-  { /* ---- LEVEL 1 — tutorial: one gate frees a stack of blocked cars ---- */
-    id: 1, name: 'First Rescue', par: 5,
-    tutorial: { vehicleId: 'gate', spaceId: 'GATE',
-      intro: 'The road is jammed! Only ONE vehicle can move first — the glowing one. Drive it into its bay to unlock the next car.' },
+  /* L1 "Traffic Jam" — 9 cars, 3 movable, 1 wastes a bay (decoy). */
+  { id: 1, name: 'Traffic Jam', par: 7,
+    tutorial: { intro: 'Real gridlock! Several cars can move — but not every move helps. Pick the ones that actually free the ambulance lane.' },
     map: roadMap(),
-    vehicles: [
-      _V(2, 5, 4, 'gate', '#8a5cc0', 'van'),      // the only opener (slides down)
-      _H(2, 3, 2, 'h1', '#e8443a'), _H(3, 3, 2, 'h2', '#26c3d7'),
-      _H(4, 3, 2, 'h3', '#f5920b'), _H(5, 3, 2, 'h4', '#3b6fe0'),
-      _V(0, 1, 2, 'bg1', '#7ac043'), _V(6, 1, 2, 'bg2', '#e46fae'),
-      _V(9, 1, 2, 'bg3', '#d9b34a'),              // background jam (boxed in)
-    ],
-    spaces: [
-      { id: 'GATE', r: 8, c: 5, orient: 'v', len: 4, maxLen: 4, minLen: 3 },
-      { id: 'B1', r: 2, c: 5, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'B2', r: 3, c: 5, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'B3', r: 4, c: 5, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'B4', r: 5, c: 5, orient: 'h', len: 2, maxLen: 2 },
-    ],
-    ambulance: { r: 12, c: 3 },
-  },
+    vehicles:[{id:'c0',kind:'car',color:'#e8443a',len:2,orient:'h',r:9,c:0},{id:'c1',kind:'van',color:'#26c3d7',len:3,orient:'v',r:5,c:5},{id:'c2',kind:'car',color:'#f5920b',len:2,orient:'h',r:5,c:3},{id:'c3',kind:'car',color:'#3b6fe0',len:2,orient:'v',r:1,c:2},{id:'c4',kind:'car',color:'#7ac043',len:2,orient:'v',r:10,c:1},{id:'c5',kind:'car',color:'#9b59d0',len:2,orient:'v',r:9,c:4},{id:'c6',kind:'car',color:'#e46fae',len:2,orient:'h',r:9,c:2},{id:'c7',kind:'van',color:'#d9b34a',len:3,orient:'h',r:2,c:3},{id:'c8',kind:'car',color:'#37c9a5',len:2,orient:'h',r:4,c:2}],
+    spaces:[{id:'S0',r:9,c:0,orient:'h',len:2,maxLen:2},{id:'S1',r:10,c:5,orient:'v',len:3,maxLen:3},{id:'S2',r:5,c:5,orient:'h',len:2,maxLen:2},{id:'S3',r:3,c:2,orient:'v',len:2,maxLen:2},{id:'S4',r:12,c:1,orient:'v',len:2,maxLen:2},{id:'S5',r:3,c:4,orient:'v',len:2,maxLen:2},{id:'S6',r:9,c:5,orient:'h',len:2,maxLen:2},{id:'S7',r:2,c:0,orient:'h',len:3,maxLen:3},{id:'S8',r:4,c:5,orient:'h',len:2,maxLen:2}],
+    ambulance:{r:12,c:3} },
 
-  { /* ---- LEVEL 2 — a small opener frees the gate; one decoy car ---- */
-    id: 2, name: 'Rush Hour', par: 6,
+  /* L2 "Bottleneck" — 11 cars, 3 movable, 1 trap + 1 waste. Long bays matter. */
+  { id: 2, name: 'Bottleneck', par: 8,
     map: roadMap(),
-    vehicles: [
-      _H(8, 4, 2, 'sc', '#7ac043'),               // opener: slides left to a bay
-      _V(2, 5, 4, 'gate', '#8a5cc0', 'van'),
-      _H(2, 3, 2, 'd1', '#e8443a'), _H(3, 3, 2, 'd2', '#26c3d7'),
-      _H(4, 3, 2, 'd3', '#f5920b'), _H(5, 3, 2, 'd4', '#3b6fe0'),
-      _V(0, 5, 2, 'decoy', '#e4b04f'),            // looks parkable, but is boxed in
-      _V(0, 2, 2, 'bg1', '#5b8fd0'), _V(6, 2, 2, 'bg2', '#c96f6f'),
-      _V(9, 2, 2, 'bg3', '#4aa39a'), _V(11, 2, 2, 'bg4', '#b06fd0'),
-    ],
-    spaces: [
-      { id: 'L8', r: 8, c: 0, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'GATE', r: 9, c: 5, orient: 'v', len: 4, maxLen: 4, minLen: 3 },
-      { id: 'B1', r: 2, c: 5, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'B2', r: 3, c: 5, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'B3', r: 4, c: 5, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'B4', r: 5, c: 5, orient: 'h', len: 2, maxLen: 2 },
-    ],
-    ambulance: { r: 12, c: 3 },
-  },
+    vehicles:[{id:'c0',kind:'car',color:'#e8443a',len:2,orient:'h',r:10,c:0},{id:'c1',kind:'van',color:'#26c3d7',len:3,orient:'h',r:3,c:2},{id:'c2',kind:'car',color:'#f5920b',len:2,orient:'v',r:9,c:5},{id:'c3',kind:'car',color:'#3b6fe0',len:2,orient:'v',r:7,c:5},{id:'c4',kind:'car',color:'#7ac043',len:2,orient:'h',r:10,c:2},{id:'c5',kind:'car',color:'#9b59d0',len:2,orient:'h',r:9,c:2},{id:'c6',kind:'van',color:'#e46fae',len:3,orient:'h',r:2,c:3},{id:'c7',kind:'car',color:'#d9b34a',len:2,orient:'h',r:13,c:0},{id:'c8',kind:'van',color:'#37c9a5',len:3,orient:'v',r:11,c:2},{id:'c9',kind:'car',color:'#c96f35',len:2,orient:'v',r:2,c:1},{id:'c10',kind:'van',color:'#4aa3f0',len:3,orient:'h',r:5,c:2}],
+    spaces:[{id:'S0',r:10,c:0,orient:'h',len:2,maxLen:2},{id:'S1',r:3,c:0,orient:'h',len:3,maxLen:3},{id:'S2',r:6,c:5,orient:'v',len:2,maxLen:2},{id:'S3',r:3,c:5,orient:'v',len:2,maxLen:2},{id:'S4',r:10,c:5,orient:'h',len:2,maxLen:2},{id:'S5',r:9,c:5,orient:'h',len:2,maxLen:2},{id:'S6',r:2,c:0,orient:'h',len:3,maxLen:3},{id:'S7',r:13,c:0,orient:'h',len:2,maxLen:2},{id:'S8',r:6,c:2,orient:'v',len:3,maxLen:3},{id:'S9',r:5,c:1,orient:'v',len:2,maxLen:2},{id:'S10',r:5,c:4,orient:'h',len:3,maxLen:3}],
+    ambulance:{r:12,c:3} },
 
-  { /* ---- LEVEL 3 — a long truck blocks four cars; free the small one first ---- */
-    id: 3, name: 'The Long Truck', par: 6,
+  /* L3 "Crossroads" — 13 cars, 4 movable, 2 traps + 2 wastes. Lots of choice. */
+  { id: 3, name: 'Crossroads', par: 10,
     map: roadMap(),
-    vehicles: [
-      _H(8, 4, 2, 'small', '#7ac043'),            // must move before the truck can
-      _V(2, 5, 4, 'truck', '#c96f35', 'van'),
-      _H(2, 3, 2, 'd1', '#e8443a'), _H(3, 3, 2, 'd2', '#26c3d7'),
-      _H(4, 3, 2, 'd3', '#f5920b'), _H(5, 3, 2, 'd4', '#3b6fe0'),
-      _V(0, 5, 2, 'dz', '#e4b04f'),
-      _V(0, 2, 2, 'b1', '#5b8fd0'), _V(3, 2, 2, 'b2', '#c96f9f'),
-      _V(10, 2, 2, 'b3', '#4aa39a'), _V(12, 2, 2, 'b4', '#b06fd0'),
-      _V(0, 1, 2, 'b5', '#d0a24a'), _V(12, 4, 2, 'b6', '#6f8fd0'),
-    ],
-    spaces: [
-      { id: 'L8', r: 8, c: 0, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'GATE', r: 9, c: 5, orient: 'v', len: 4, maxLen: 4, minLen: 3 },
-      { id: 'B1', r: 2, c: 5, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'B2', r: 3, c: 5, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'B3', r: 4, c: 5, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'B4', r: 5, c: 5, orient: 'h', len: 2, maxLen: 2 },
-    ],
-    ambulance: { r: 12, c: 3 },
-  },
+    vehicles:[{id:'c0',kind:'van',color:'#e8443a',len:3,orient:'v',r:11,c:1},{id:'c1',kind:'car',color:'#26c3d7',len:2,orient:'h',r:11,c:3},{id:'c2',kind:'van',color:'#f5920b',len:3,orient:'v',r:4,c:4},{id:'c3',kind:'van',color:'#3b6fe0',len:3,orient:'v',r:8,c:2},{id:'c4',kind:'car',color:'#7ac043',len:2,orient:'h',r:0,c:3},{id:'c5',kind:'car',color:'#9b59d0',len:2,orient:'v',r:11,c:2},{id:'c6',kind:'car',color:'#e46fae',len:2,orient:'h',r:8,c:3},{id:'c7',kind:'van',color:'#d9b34a',len:3,orient:'v',r:0,c:5},{id:'c8',kind:'car',color:'#37c9a5',len:2,orient:'h',r:1,c:2},{id:'c9',kind:'car',color:'#c96f35',len:2,orient:'v',r:9,c:4},{id:'c10',kind:'car',color:'#4aa3f0',len:2,orient:'v',r:0,c:1},{id:'c11',kind:'van',color:'#e3d13c',len:3,orient:'h',r:7,c:1},{id:'c12',kind:'van',color:'#8a5cc0',len:3,orient:'v',r:3,c:5}],
+    spaces:[{id:'S0',r:4,c:1,orient:'v',len:3,maxLen:3},{id:'S1',r:11,c:0,orient:'h',len:2,maxLen:2},{id:'S2',r:0,c:4,orient:'v',len:3,maxLen:3},{id:'S3',r:0,c:2,orient:'v',len:3,maxLen:3},{id:'S4',r:0,c:5,orient:'h',len:2,maxLen:2},{id:'S5',r:4,c:2,orient:'v',len:2,maxLen:2},{id:'S6',r:8,c:5,orient:'h',len:2,maxLen:2},{id:'S7',r:3,c:5,orient:'v',len:3,maxLen:3},{id:'S8',r:1,c:5,orient:'h',len:2,maxLen:2},{id:'S9',r:9,c:4,orient:'v',len:2,maxLen:2},{id:'S10',r:1,c:1,orient:'v',len:2,maxLen:2},{id:'S11',r:7,c:4,orient:'h',len:3,maxLen:3},{id:'S12',r:10,c:5,orient:'v',len:3,maxLen:3}],
+    ambulance:{r:12,c:3} },
 
-  { /* ---- LEVEL 4 — move the van into a side street to unlock the gate ---- */
-    id: 4, name: 'Side Street', par: 6,
+  /* L4 "Rush Hour" — 15 cars, 3 movable, a real trap. Trucks need long bays. */
+  { id: 4, name: 'Rush Hour', par: 9,
     map: roadMap(),
-    vehicles: [
-      _H(8, 3, 3, 'mover', '#37c9a5', 'van'),     // opener: drives into the side-street bay
-      _V(2, 5, 4, 'gate', '#8a5cc0', 'van'),
-      _H(2, 3, 2, 'd1', '#e8443a'), _H(3, 3, 2, 'd2', '#26c3d7'),
-      _H(4, 3, 2, 'd3', '#f5920b'), _H(5, 3, 2, 'd4', '#3b6fe0'),
-      _V(0, 5, 2, 'dz', '#e4b04f'),
-      _V(0, 2, 2, 'b1', '#5b8fd0'), _V(2, 2, 2, 'b2', '#c96f9f'),
-      _V(5, 2, 2, 'b3', '#4aa39a'), _V(10, 2, 2, 'b4', '#b06fd0'),
-      _V(12, 2, 2, 'b5', '#d0a24a'), _V(0, 1, 2, 'b6', '#6f8fd0'),
-      _V(12, 4, 2, 'b7', '#c98f6f'), _V(10, 1, 2, 'b8', '#9fc96f'),
-    ],
-    spaces: [
-      { id: 'SIDE', r: 8, c: 0, orient: 'h', len: 3, maxLen: 3, minLen: 3 },
-      { id: 'GATE', r: 9, c: 5, orient: 'v', len: 4, maxLen: 4, minLen: 3 },
-      { id: 'B1', r: 2, c: 5, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'B2', r: 3, c: 5, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'B3', r: 4, c: 5, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'B4', r: 5, c: 5, orient: 'h', len: 2, maxLen: 2 },
-    ],
-    ambulance: { r: 12, c: 3 },
-  },
+    vehicles:[{id:'c0',kind:'van',color:'#e8443a',len:3,orient:'h',r:7,c:3},{id:'c1',kind:'car',color:'#26c3d7',len:2,orient:'v',r:8,c:2},{id:'c2',kind:'car',color:'#f5920b',len:2,orient:'h',r:4,c:3},{id:'c3',kind:'truck',color:'#3b6fe0',len:4,orient:'v',r:0,c:1},{id:'c4',kind:'truck',color:'#7ac043',len:4,orient:'v',r:10,c:5},{id:'c5',kind:'van',color:'#9b59d0',len:3,orient:'v',r:4,c:2},{id:'c6',kind:'car',color:'#e46fae',len:2,orient:'h',r:0,c:2},{id:'c7',kind:'car',color:'#d9b34a',len:2,orient:'h',r:10,c:2},{id:'c8',kind:'car',color:'#37c9a5',len:2,orient:'v',r:6,c:1},{id:'c9',kind:'truck',color:'#c96f35',len:4,orient:'v',r:1,c:5},{id:'c10',kind:'truck',color:'#4aa3f0',len:4,orient:'v',r:10,c:4},{id:'c11',kind:'car',color:'#e3d13c',len:2,orient:'h',r:1,c:2},{id:'c12',kind:'car',color:'#8a5cc0',len:2,orient:'v',r:0,c:4},{id:'c13',kind:'car',color:'#ef5f7e',len:2,orient:'h',r:2,c:3},{id:'c14',kind:'van',color:'#3fbfc9',len:3,orient:'v',r:11,c:2}],
+    spaces:[{id:'S0',r:7,c:0,orient:'h',len:3,maxLen:3},{id:'S1',r:9,c:2,orient:'v',len:2,maxLen:2},{id:'S2',r:4,c:5,orient:'h',len:2,maxLen:2},{id:'S3',r:2,c:1,orient:'v',len:4,maxLen:4},{id:'S4',r:10,c:5,orient:'v',len:4,maxLen:4},{id:'S5',r:1,c:2,orient:'v',len:3,maxLen:3},{id:'S6',r:0,c:0,orient:'h',len:2,maxLen:2},{id:'S7',r:10,c:0,orient:'h',len:2,maxLen:2},{id:'S8',r:11,c:1,orient:'v',len:2,maxLen:2},{id:'S9',r:6,c:5,orient:'v',len:4,maxLen:4},{id:'S10',r:6,c:4,orient:'v',len:4,maxLen:4},{id:'S11',r:1,c:0,orient:'h',len:2,maxLen:2},{id:'S12',r:0,c:4,orient:'v',len:2,maxLen:2},{id:'S13',r:2,c:5,orient:'h',len:2,maxLen:2},{id:'S14',r:11,c:2,orient:'v',len:3,maxLen:3}],
+    ambulance:{r:12,c:3} },
 
-  { /* ---- LEVEL 5 — four-stage chain: opener -> keystone -> gate -> drain ---- */
-    id: 5, name: 'Gridlock', par: 7,
+  /* L5 "Deadlock" — 16 cars, 4 movable, 2 wasteful decoys. Plan the sequence. */
+  { id: 5, name: 'Deadlock', par: 8,
     map: roadMap(),
-    vehicles: [
-      _V(9, 5, 2, 'sK', '#7ac043'),               // only opener (slides down)
-      _H(9, 1, 3, 'key', '#e3d13c', 'van'),       // keystone: freed by sK, frees the left gate
-      _V(5, 1, 4, 'gateL', '#8a5cc0', 'van'),     // blocks four cars' left exits
-      _H(5, 2, 2, 'dl1', '#e8443a'), _H(6, 2, 2, 'dl2', '#26c3d7'),
-      _H(7, 2, 2, 'dl3', '#f5920b'), _H(8, 2, 2, 'dl4', '#3b6fe0'),
-      _V(0, 5, 2, 'dz', '#e4b04f'),
-      _V(0, 2, 2, 'b1', '#5b8fd0'), _V(2, 2, 2, 'b2', '#c96f9f'),
-      _V(0, 4, 2, 'b3', '#4aa39a'), _V(2, 4, 2, 'b4', '#b06fd0'),
-      _V(0, 1, 2, 'b5', '#d0a24a'), _V(2, 5, 2, 'b6', '#6f8fd0'),
-      _V(4, 5, 2, 'b7', '#9fc96f'), _V(6, 5, 2, 'b8', '#d06f9f'),
-    ],
-    spaces: [
-      { id: 'SK', r: 11, c: 5, orient: 'v', len: 2, maxLen: 2 },
-      { id: 'KEY', r: 9, c: 4, orient: 'h', len: 3, maxLen: 3, minLen: 3 },
-      { id: 'GL', r: 9, c: 1, orient: 'v', len: 4, maxLen: 4, minLen: 3 },
-      { id: 'A1', r: 5, c: 0, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'A2', r: 6, c: 0, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'A3', r: 7, c: 0, orient: 'h', len: 2, maxLen: 2 },
-      { id: 'A4', r: 8, c: 0, orient: 'h', len: 2, maxLen: 2 },
-    ],
-    ambulance: { r: 12, c: 3 },
-  },
+    vehicles:[{id:'c0',kind:'van',color:'#e8443a',len:3,orient:'v',r:9,c:4},{id:'c1',kind:'car',color:'#26c3d7',len:2,orient:'h',r:10,c:5},{id:'c2',kind:'car',color:'#f5920b',len:2,orient:'h',r:11,c:0},{id:'c3',kind:'car',color:'#3b6fe0',len:2,orient:'h',r:0,c:5},{id:'c4',kind:'truck',color:'#7ac043',len:4,orient:'v',r:10,c:2},{id:'c5',kind:'car',color:'#9b59d0',len:2,orient:'v',r:6,c:1},{id:'c6',kind:'car',color:'#e46fae',len:2,orient:'h',r:1,c:5},{id:'c7',kind:'car',color:'#d9b34a',len:2,orient:'h',r:9,c:2},{id:'c8',kind:'car',color:'#37c9a5',len:2,orient:'h',r:0,c:3},{id:'c9',kind:'car',color:'#c96f35',len:2,orient:'h',r:10,c:0},{id:'c10',kind:'truck',color:'#4aa3f0',len:4,orient:'v',r:2,c:5},{id:'c11',kind:'van',color:'#e3d13c',len:3,orient:'h',r:1,c:2},{id:'c12',kind:'van',color:'#8a5cc0',len:3,orient:'h',r:12,c:4},{id:'c13',kind:'car',color:'#ef5f7e',len:2,orient:'v',r:0,c:1},{id:'c14',kind:'car',color:'#3fbfc9',len:2,orient:'h',r:5,c:3},{id:'c15',kind:'car',color:'#e8443a',len:2,orient:'h',r:2,c:2}],
+    spaces:[{id:'S0',r:3,c:4,orient:'v',len:3,maxLen:3},{id:'S1',r:10,c:5,orient:'h',len:2,maxLen:2},{id:'S2',r:11,c:0,orient:'h',len:2,maxLen:2},{id:'S3',r:0,c:5,orient:'h',len:2,maxLen:2},{id:'S4',r:5,c:2,orient:'v',len:4,maxLen:4},{id:'S5',r:8,c:1,orient:'v',len:2,maxLen:2},{id:'S6',r:1,c:5,orient:'h',len:2,maxLen:2},{id:'S7',r:9,c:5,orient:'h',len:2,maxLen:2},{id:'S8',r:0,c:0,orient:'h',len:2,maxLen:2},{id:'S9',r:10,c:0,orient:'h',len:2,maxLen:2},{id:'S10',r:5,c:5,orient:'v',len:4,maxLen:4},{id:'S11',r:1,c:0,orient:'h',len:3,maxLen:3},{id:'S12',r:12,c:4,orient:'h',len:3,maxLen:3},{id:'S13',r:3,c:1,orient:'v',len:2,maxLen:2},{id:'S14',r:5,c:0,orient:'h',len:2,maxLen:2},{id:'S15',r:2,c:5,orient:'h',len:2,maxLen:2}],
+    ambulance:{r:12,c:3} },
 ];
 
 /* =========================================================================
@@ -855,37 +788,43 @@ class HintSystem {
   /** Best next move: the solver's first move, with a heuristic fallback. */
   static getHint(game) {
     const vehicles = game.allObstacles();
-    const solution = solveLevel(game.board, vehicles, game.spacesPlain());
-    let vehicleId = null, spaceId = null;
-
-    if (solution && solution.length) {
-      vehicleId = solution[0].vehicleId;
-      spaceId = solution[0].spaceId;
-    } else {
-      // Fallback: strongest blocker with any reachable space.
-      const blockers = game.vehicles
-        .map(v => ({
-          v,
-          n: footprint(v.r, v.c, v.orient, v.len)
-            .filter(([r, c]) => game.board.routeSet.has(r + ',' + c)).length,
-        }))
-        .filter(b => b.n > 0)
-        .sort((a, b) => b.n - a.n);
-      for (const b of blockers) {
-        const ts = computeTargets(game.board, vehicles, game.spacesPlain(), b.v.id);
-        if (ts.length) { vehicleId = b.v.id; spaceId = ts[0].spaceId; break; }
-      }
-      if (!vehicleId) {
-        // Last resort: any movable vehicle (in a chain level, often the only one).
-        const ids = movableVehicles(game.board, vehicles, game.spacesPlain());
-        if (ids.length) vehicleId = ids[0];
-      }
-    }
-    if (!vehicleId) return null;
+    // The strategically correct move is the first step of an optimal solution.
+    const solution = solveLevel(game.board, vehicles, game.spacesPlain(), game.vehicles.length + 4);
+    // No solution from here means the player has trapped themselves -> suggest undo.
+    if (!solution || !solution.length) return null;
+    const vehicleId = solution[0].vehicleId;
+    const spaceId = solution[0].spaceId;
     const ts = computeTargets(game.board, vehicles, game.spacesPlain(), vehicleId);
     const t = ts.find(t => t.spaceId === spaceId) || ts[0];
     if (!t) return null;
-    return { vehicleId, spaceId: t.spaceId, path: t.path };
+    return { vehicleId, spaceId: t.spaceId, path: t.path,
+      reason: HintSystem.reason(game, vehicleId, t) };
+  }
+
+  /** A short strategic explanation for the recommended move. */
+  static reason(game, vehicleId, target) {
+    const veh = game.vehicleById(vehicleId);
+    const space = game.spaceById(target.spaceId);
+    const onRoute = footprint(veh.r, veh.c, veh.orient, veh.len)
+      .some(([r, c]) => game.board.routeSet.has(r + ',' + c));
+
+    // Is there a free long bay that a small car could wrongly steal? Then the
+    // key lesson is to protect it for the vehicle that actually needs it.
+    const longBays = game.spaces.filter(s => s.len >= 3 && game.spaceIsFree(s));
+    const bigCarsNeedingBay = game.vehicles.some(v => v.len >= 3 && !v.spaceId);
+    if (longBays.length && bigCarsNeedingBay && veh.len < 3) {
+      const tempted = game.movableIds && [...game.movableIds].some(id => {
+        const c = game.vehicleById(id);
+        if (!c || c.len >= 3) return false;
+        return computeTargets(game.board, game.allObstacles(), game.spaces, id)
+          .some(tt => { const sp = game.spaceById(tt.spaceId); return sp && sp.len >= 3; });
+      });
+      if (tempted) return 'Keep the long bay free for a bigger vehicle.';
+    }
+
+    if (veh.len >= 3 && space && space.len >= 3) return 'Get the long vehicle into the long bay.';
+    if (onRoute) return 'This clears the emergency lane.';
+    return 'Move this to open up the jam.';
   }
 }
 
@@ -1708,8 +1647,9 @@ class Renderer {
       ctx.shadowColor = selected ? 'rgba(255,255,255,0.95)' : 'rgba(255,201,60,0.95)';
       ctx.shadowBlur = cs * 0.5;
     } else if (movable && !ghost) {
-      ctx.shadowColor = `rgba(170,255,205,${0.55 + 0.25 * Math.sin(t * 0.006)})`;
-      ctx.shadowBlur = cs * 0.3;
+      // Very subtle "this one can move" hint — not a spotlight.
+      ctx.shadowColor = `rgba(180,240,210,${0.22 + 0.1 * Math.sin(t * 0.005)})`;
+      ctx.shadowBlur = cs * 0.16;
     }
 
     // Body with a top-lit candy gradient.
@@ -2340,11 +2280,8 @@ class Game {
       this.audio.invalid();
       return;
     }
-    if (this.tutorial.active && this.tutorial.step === 0 && vehicleId !== this.tutorial.vehicleId) {
-      this.ui.toast('Only the glowing car can move first!', 1100);
-      this.audio.invalid();
-      return;
-    }
+    // Tutorial is informational now — several cars are movable, the player
+    // chooses. We no longer hard-lock selection to one "correct" car.
     this.selection = { vehicleId, targets: new Map(targets.map(t => [t.spaceId, t])) };
     this.setState('selected');
     this.audio.select();
@@ -2387,12 +2324,6 @@ class Game {
     if (!this.selection) return;
     const target = this.selection.targets.get(sp.id);
     if (!target) {
-      this.flashFx = { spaceId: sp.id, until: this.now + 450 };
-      this.audio.invalid();
-      return;
-    }
-    if (this.tutorial.active && this.tutorial.step === 0 && sp.id !== this.tutorial.spaceId) {
-      this.ui.toast('Use the glowing bay!', 1100);
       this.flashFx = { spaceId: sp.id, until: this.now + 450 };
       this.audio.invalid();
       return;
@@ -2443,7 +2374,7 @@ class Game {
       // Tutorial advances after the first parked vehicle.
       if (this.tutorial.active && this.tutorial.step === 0) {
         this.tutorial.step = 1;
-        this.ui.tutorial('It worked! Each move unlocks the next car — find the new glowing car and keep the chain going.');
+        this.ui.tutorial('Nice! But watch out — some moves waste a bay or trap a car. Plan ahead, and Undo if you get stuck.');
         this.routeGlowUntil = this.now + 2600;
         setTimeout(() => { if (this.tutorial.active) this.ui.tutorial(null); }, 4600);
       }
@@ -2589,7 +2520,7 @@ class Game {
       }
     }
     const h = HintSystem.getHint(this);
-    if (!h) { this.ui.toast('Try undoing a move!', 1200); return; }
+    if (!h) { this.ui.toast('No good move — try Undo!', 1500); return; }
 
     if (this.hintsLeft > 0) this.hintsLeft--;
     else {
@@ -2598,8 +2529,9 @@ class Game {
     }
     this.hintFx = { ...h, until: this.now + TUNE.hintShowMs };
     this.audio.hint();
+    if (h.reason) this.ui.toast('💡 ' + h.reason, 2400);   // short strategic explanation
     this.ui.updateHintBadge(this.hintsLeft);
-    this.ui.updateHUD(this.levelDef().id, this.moves, this.levelDef().par, this.save.data.coins);
+    this.ui.updateHUD(this.hudLabel(), this.moves, this.levelDef().par, this.save.data.coins);
   }
 
   /* --------------------------- restart & pause --------------------------- */

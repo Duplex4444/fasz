@@ -33,20 +33,31 @@ No build system, no server, no dependencies:
   next correct car in the chain (3 free per level, then coins), **Restart**
   resets the level (with confirmation once you've moved).
 
-## The puzzle design
+## The puzzle design — real choices, not a linear chain
 
-Each level is a dense jam (8–18 cars) engineered so that **exactly one vehicle
-is movable at the start**. Moving it unblocks one or two others, and so on:
+Each level is a dense jam (9–16 cars) where **2–4 vehicles are legally movable
+at any moment**, but only some moves are strategically good. The others are
+**decoys**: a legal move that wastes a bay, blocks a later car, or dead-ends the
+whole puzzle so you have to Undo. Because a small car fits a long bay, parking
+it there too early can strand a van or truck — so you must think before you tap.
 
-- **Level 1** — tutorial: one "gate" van frees a stack of blocked cars.
-- **Level 2** — a small opener frees the gate; includes a decoy car that looks
-  useful but is boxed in.
-- **Level 3** — a long truck blocks four cars; free the small car first.
-- **Level 4** — a van must pull into a side street to unlock the gate.
-- **Level 5** — a four-stage chain: opener → keystone → gate → drain.
+- **Level 1 "Traffic Jam"** — 9 cars, 3 movable; one move wastes a bay.
+- **Level 2 "Bottleneck"** — 11 cars, 3 movable; a real trap + a wasteful decoy.
+- **Level 3 "Crossroads"** — 13 cars, 4 movable; 2 traps and 2 wastes — lots of choice.
+- **Level 4 "Rush Hour"** — 15 cars, 3 movable; trucks need the long bays, one move dead-ends.
+- **Level 5 "Deadlock"** — 16 cars, 4 movable; plan the sequence or get boxed in.
 
-`movableVehicles()` computes the movable set from live positions; a car is
-movable only if it has at least one reachable legal destination right now.
+Every level is built and proven by the generator + a choice-analyzer that
+verifies: 2–4 movable at the start, at least one decoy move, at least one good
+move (a genuine decision), no four identical cars lined up, and full
+solvability. `movableVehicles()` computes the movable set from live positions;
+a car is movable only if it has a reachable legal destination right now, and
+movable cars carry only a *subtle* glow — the challenge is choosing well, not
+spotting the one glowing car.
+
+The **Hint** recommends the strategically correct move (the first step of an
+optimal solution, never a decoy) and shows a short reason such as *“Keep the
+long bay free for a bigger vehicle.”*
 
 ## Endless mode — infinite generated puzzles
 
@@ -80,8 +91,8 @@ coins. Owned skins, the equipped skin, and coins persist in `localStorage`.
 
 ## Features
 
-- 5 chain-reaction campaign levels, each proven by an automated solver to start
-  with exactly one movable car and to be solvable only in the correct order
+- 5 choice-driven campaign levels, each proven to start with 2–4 movable cars,
+  to contain decoy/trap moves and a real decision, and to be solvable
 - Endless mode: an infinite supply of backward-generated, always-solvable,
   varied puzzles with a difficulty ramp and saved best round
 - Garage with buyable ambulance skins, a simulated rewarded-ad flow, coin

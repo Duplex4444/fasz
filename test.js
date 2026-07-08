@@ -41,8 +41,43 @@ function playSolution(def) {
   return { board, sol, states };
 }
 
-/* ==================== 1. validate + chain structure per level ============== */
-console.log('\n== Level validation (geometry + chain structure + solver) ==');
+/** Classify every legal first move as good (optimal/win) or decoy (trap/waste). */
+function classifyFirstMoves(def) {
+  const board = parseBoard(def);
+  const vs = obstaclesOf(def);
+  const depth = def.vehicles.length + 4;
+  const opt = solveLevel(board, vs, def.spaces, depth);
+  if (!opt) return null;
+  const out = { good: 0, waste: 0, trap: 0, moves: [] };
+  for (const id of movableVehicles(board, vs, def.spaces)) {
+    for (const t of computeTargets(board, vs, def.spaces, id)) {
+      const vs2 = vs.map(v => v.id === id ? { ...v, r: t.r, c: t.c, orient: t.orient } : v);
+      let cls;
+      if (routeIsClear(board, vs2)) cls = 'good';
+      else {
+        const sub = solveLevel(board, vs2, def.spaces, depth);
+        cls = !sub ? 'trap' : (1 + sub.length > opt.length ? 'waste' : 'good');
+      }
+      out[cls === 'good' ? 'good' : cls]++;
+      out.moves.push({ id, sp: t.spaceId, cls });
+    }
+  }
+  out.optLen = opt.length;
+  return out;
+}
+
+/** Largest group of vehicles sharing (orient,len) in the same anchor lane. */
+function maxIdenticalInLane(def) {
+  const lanes = {};
+  for (const v of def.vehicles) {
+    const key = v.orient + v.len + '@' + (v.orient === 'h' ? 'c' + v.c : 'r' + v.r);
+    lanes[key] = (lanes[key] || 0) + 1;
+  }
+  return Math.max(0, ...Object.values(lanes));
+}
+
+/* ==================== 1. choice-puzzle structure per level ================= */
+console.log('\n== Level validation (geometry + choices + solver) ==');
 const CAR_RANGE = { 1: [8, 10], 2: [10, 12], 3: [12, 14], 4: [15, 15], 5: [15, 18] };
 for (const def of LEVELS) {
   console.log(`Level ${def.id} — ${def.name}`);
@@ -54,16 +89,28 @@ for (const def of LEVELS) {
   const board = parseBoard(def);
   const vs = obstaclesOf(def);
 
-  // Required: dense jam, exactly one movable vehicle at the start.
   const [lo, hi] = CAR_RANGE[def.id];
   ok(def.vehicles.length >= lo && def.vehicles.length <= hi,
     `level ${def.id} has ${def.vehicles.length} cars (want ${lo}-${hi})`);
+
+  // Required: 2-4 legal moves at the start (a real choice, not a chain).
   const startMovable = movableVehicles(board, vs, def.spaces);
-  ok(startMovable.length === 1,
-    `level ${def.id} starts with exactly 1 movable vehicle (${JSON.stringify(startMovable)})`);
+  ok(startMovable.length >= 2 && startMovable.length <= 4,
+    `level ${def.id} starts with 2-4 movable vehicles (${startMovable.length}: ${JSON.stringify(startMovable)})`);
+
+  // Required: no 4 identical vehicles lined up doing the same move.
+  ok(maxIdenticalInLane(def) < 4,
+    `level ${def.id} has no 4 identical vehicles in one lane (max ${maxIdenticalInLane(def)})`);
 
   // Required: the ambulance route is blocked at the start.
   ok(!routeIsClear(board, vs), `level ${def.id} route is blocked at the start`);
+
+  // Required: at least one decoy move and at least one good move (a decision).
+  const cls = classifyFirstMoves(def);
+  ok(cls && cls.trap + cls.waste >= 1,
+    `level ${def.id} has at least one decoy move (${cls ? cls.trap + ' trap, ' + cls.waste + ' waste' : 'n/a'})`);
+  ok(cls && cls.good >= 1 && (cls.trap + cls.waste) >= 1,
+    `level ${def.id} requires a meaningful decision (good + decoy both exist)`);
 
   // Required: solvable, and the route only becomes clear at the very end.
   const played = playSolution(def);
@@ -71,15 +118,15 @@ for (const def of LEVELS) {
   if (played) {
     ok(played.sol.length === def.par,
       `level ${def.id} par (${def.par}) matches optimal solution (${played.sol.length})`);
-    // Ambulance stays blocked until the final move of the chain.
     let clearedEarly = false;
     for (let i = 0; i < played.states.length - 1; i++) {
       if (routeIsClear(board, played.states[i])) clearedEarly = true;
     }
-    ok(!clearedEarly, `level ${def.id} route stays blocked until the chain is complete`);
+    ok(!clearedEarly, `level ${def.id} route stays blocked until the plan is complete`);
     ok(routeIsClear(board, played.states[played.states.length - 1]),
-      `level ${def.id} route is clear after the chain (ambulance can exit)`);
-    console.log('    chain: ' + played.sol.map(m => `${m.vehicleId}→${m.spaceId}`).join(', '));
+      `level ${def.id} route is clear after the solution (ambulance can exit)`);
+    console.log('    optimal: ' + played.sol.map(m => `${m.vehicleId}→${m.spaceId}`).join(', ') +
+      `  | first-move choices: ${cls.good} good / ${cls.trap} trap / ${cls.waste} waste`);
   }
 }
 
@@ -99,15 +146,17 @@ for (const def of LEVELS) {
   ok(blockedHaveNoTargets, `level ${def.id}: all ${blockedCount} blocked cars have no legal target`);
 }
 
-/* ==================== 3. movable set grows as the chain is played ========== */
-console.log('\n== Chain reaction: moves unlock new vehicles ==');
+/* ==================== 3. every level offers real choices ================== */
+console.log('\n== Choices: multiple movers, decoys, and traps exist ==');
 {
-  const def = LEVELS[0];
-  const played = playSolution(def);
-  const m0 = movableVehicles(played.board, played.states[0], def.spaces);
-  const m1 = movableVehicles(played.board, played.states[1], def.spaces);
-  ok(m0.length === 1, 'level 1 has 1 movable before the first move');
-  ok(m1.length > m0.length, 'level 1: the opener unlocks additional vehicles');
+  let anyTrap = false, everyLevelDecision = true;
+  for (const def of LEVELS) {
+    const cls = classifyFirstMoves(def);
+    if (cls.trap > 0) anyTrap = true;
+    if (!(cls.good >= 1 && cls.trap + cls.waste >= 1)) everyLevelDecision = false;
+  }
+  ok(everyLevelDecision, 'every level has both a good move and a decoy move at the start');
+  ok(anyTrap, 'at least one level has a hard trap (a legal move that dead-ends)');
 }
 
 /* ==================== 4. movement realism (axis-only, no crab-slide) ======= */
@@ -163,29 +212,34 @@ for (const def of LEVELS) {
   const endIds = finalState.filter(v => v.id !== AMB_ID).map(v => v.id).sort().join(',');
   ok(startIds === endIds, `level ${def.id}: no vehicle disappears during the solution`);
 
-  // Every vehicle that moved ends fully inside a declared parking space.
+  // Every move lands the vehicle fully inside its declared bay (checked at the
+  // moment of that move, so cars that move twice are handled correctly).
   let allParked = true;
-  for (const m of played.sol) {
-    const v = finalState.find(x => x.id === m.vehicleId);
-    const sp = def.spaces.find(s => s.id === m.spaceId);
-    const cells = spaceCells(sp);
+  for (let i = 0; i < played.sol.length; i++) {
+    const m = played.sol[i];
+    const v = played.states[i + 1].find(x => x.id === m.vehicleId);
+    const cells = spaceCells(def.spaces.find(s => s.id === m.spaceId));
     const inside = footprint(v.r, v.c, v.orient, v.len)
       .every(([r, c]) => cells.some(([sr, sc]) => sr === r && sc === c));
     if (!inside) allParked = false;
   }
-  ok(allParked, `level ${def.id}: every moved vehicle parks fully inside a real bay`);
+  ok(allParked, `level ${def.id}: every move parks a vehicle fully inside a real bay`);
 }
 
-/* ==================== 6. hint points at the next chain move ================ */
-console.log('\n== Hint targets the correct movable car ==');
+/* ==================== 6. hint recommends a GOOD (non-decoy) move =========== */
+console.log('\n== Hint recommends a strategically good move ==');
 for (const def of LEVELS) {
   const board = parseBoard(def);
   const vs = obstaclesOf(def);
-  const startMovable = movableVehicles(board, vs, def.spaces);
-  const sol = solveLevel(board, vs, def.spaces, 24);
-  // When only one car is movable, the correct hint is unambiguous: that car.
-  ok(startMovable.length === 1 && sol && sol[0].vehicleId === startMovable[0],
-    `level ${def.id}: the single movable car is the correct first move (${startMovable[0]})`);
+  const depth = def.vehicles.length + 4;
+  const sol = solveLevel(board, vs, def.spaces, depth);
+  // The hint follows the solver's first move; verify that move is NOT a decoy:
+  // taking it keeps the level solvable at the optimal length (it's on a best line).
+  const first = sol[0];
+  const vs2 = vs.map(v => v.id === first.vehicleId ? { ...v, r: first.r, c: first.c, orient: first.orient } : v);
+  const sub = solveLevel(board, vs2, def.spaces, depth);
+  ok(sub && 1 + sub.length === sol.length,
+    `level ${def.id}: hint move ${first.vehicleId}→${first.spaceId} is optimal, not a decoy`);
 }
 
 /* ==================== 7. infinite generator (Endless mode) ================ */
