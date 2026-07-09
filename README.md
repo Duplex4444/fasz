@@ -125,6 +125,15 @@ coins. Owned skins, the equipped skin, and coins persist in `localStorage`.
 - Real undo history, chain-aware hints, stars/coins, `localStorage` saves
 - Tutorial on first play, pause menu, level select, sound toggle
 - Movable-car glow, blocked-car shake + badge, unlock sparkles, confetti
+- Polished toy-3D presentation: vehicles are extruded (a darker base under a
+  glossy top face) for real depth, with per-car variety, wheels, windshields,
+  and head/tail lights; the board is a framed "stage" on a premium dark
+  backdrop; the ambulance is a hero object with a strobing red/blue light bar
+  and coloured light-spill on the road; parking dust, sparkles, confetti, and a
+  soft vignette round out the feel. Static scenery (grass, asphalt, curbs,
+  painted bays, houses, trees, hydrants, fences, mailboxes, flowers) is
+  pre-rendered to an offscreen cache, so only vehicles + effects redraw each
+  frame (≈60 fps on the densest level).
 - All graphics drawn procedurally on Canvas; all sound generated with Web Audio
 - Pointer Events: touch and mouse both work; page scroll/zoom suppressed
 

@@ -744,6 +744,20 @@ class ParticleSystem {
       });
     }
   }
+  /** Tyre dust puff when a vehicle settles into its bay. */
+  dust(x, y, n = 10) {
+    const tans = ['rgba(210,205,190,0.9)', 'rgba(195,190,175,0.85)', 'rgba(225,222,210,0.9)'];
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, s = 20 + Math.random() * 70;
+      this.spawn({
+        x: x + (Math.random() - 0.5) * 8, y: y + (Math.random() - 0.5) * 8,
+        vx: Math.cos(a) * s, vy: Math.sin(a) * s * 0.6 - 10,
+        g: -20, life: 0.4 + Math.random() * 0.4,
+        w: 4 + Math.random() * 5, h: 4 + Math.random() * 5,
+        color: tans[(Math.random() * tans.length) | 0], shape: 'dot',
+      });
+    }
+  }
   update(dt) {
     for (const p of this.pool) {
       if (!p.active) continue;
@@ -1129,6 +1143,28 @@ class Renderer {
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
     const rand = mulberry32(g.seedNum * 911 + 17);
 
+    // Premium dark backdrop outside the play area.
+    const bg = c.createLinearGradient(0, 0, 0, h);
+    bg.addColorStop(0, '#28374f');
+    bg.addColorStop(1, '#1e2a3c');
+    c.fillStyle = bg;
+    c.fillRect(0, 0, w, h);
+
+    // The board is a rounded "stage" with a soft drop shadow — centred + premium.
+    const pad = cs * 0.3;
+    const bx = ox - pad, by = oy - pad, bw = COLS * cs + pad * 2, bh = ROWS * cs + pad * 2;
+    const brad = cs * 0.55;
+    c.save();
+    c.shadowColor = 'rgba(0,0,0,0.5)'; c.shadowBlur = cs * 0.7; c.shadowOffsetY = cs * 0.18;
+    c.fillStyle = '#6fbc48';
+    this.rrOn(c, bx, by, bw, bh, brad); c.fill();
+    c.restore();
+
+    // Everything inside is clipped to the stage.
+    c.save();
+    this.rrOn(c, bx, by, bw, bh, brad); c.clip();
+    this.stageRect = { bx, by, bw, bh, brad };
+
     // Grass: warm top-lit gradient + soft checker + mottled patches.
     const lawn = c.createLinearGradient(0, 0, 0, h);
     lawn.addColorStop(0, '#8ed162');
@@ -1298,6 +1334,18 @@ class Renderer {
       else if (d.kind === 'rock') this.paintRock(c, x, y, s, d.seed);
       else if (d.kind === 'flower') this.paintFlower(c, x, y, s, d.seed);
     }
+
+    c.restore();   // end stage clip
+
+    // Crisp inner highlight + soft outer edge on the stage frame.
+    const { bx: fx, by: fy, bw: fw, bh: fh, brad: fr } = this.stageRect;
+    c.strokeStyle = 'rgba(255,255,255,0.5)';
+    c.lineWidth = Math.max(2, cs * 0.05);
+    this.rrOn(c, fx, fy, fw, fh, fr); c.stroke();
+    c.strokeStyle = 'rgba(10,16,26,0.35)';
+    c.lineWidth = Math.max(1, cs * 0.03);
+    this.rrOn(c, fx - c.lineWidth, fy - c.lineWidth, fw + c.lineWidth * 2, fh + c.lineWidth * 2, fr + c.lineWidth);
+    c.stroke();
 
     this.ground = cv;
     this.groundDirty = false;
@@ -1621,145 +1669,159 @@ class Renderer {
 
   drawVehicleBody(veh, pose, { selected = false, hinted = false, movable = true, ghost = false, t = 0 } = {}) {
     const ctx = this.ctx, { cs } = this.view;
-    const L = veh.len * cs - cs * 0.2;
-    const W = cs * 0.8;
+    const horiz = Math.abs(pose.angle) < 0.01;
+    const L = veh.len * cs - cs * 0.18;   // length along the local +x (front)
+    const W = cs * 0.82;                  // width across local y
+    const sw = horiz ? L : W, sh = horiz ? W : L;   // screen-space footprint (axis-aligned)
+    const rad = cs * 0.27;
+    const seed = [...String(veh.id)].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) >>> 0, 7);
+    const variant = seed % 3;             // small per-car styling variety
+
     let scale = 1;
     if (selected) scale = 1.05;
-    if (hinted) scale = 1 + 0.035 * (0.5 + 0.5 * Math.sin(t * 0.01));
-    if (veh.bounceT > 0) scale += 0.06 * Math.sin((1 - veh.bounceT) * Math.PI * 3) * veh.bounceT;
-
-    // Refused-to-move shake for blocked traffic.
+    if (hinted) scale = 1 + 0.03 * (0.5 + 0.5 * Math.sin(t * 0.01));
+    if (veh.bounceT > 0) scale += 0.07 * Math.sin((1 - veh.bounceT) * Math.PI * 3) * veh.bounceT;
+    const lift = (selected ? cs * 0.12 : 0) + (veh.bounceT > 0 ? cs * 0.07 * veh.bounceT : 0);
     const shakeX = veh.shakeT > 0 ? Math.sin(veh.shakeT * 34) * cs * 0.07 * veh.shakeT : 0;
+    const depth = ghost ? 0 : cs * 0.16;  // toy-3D extrusion height
 
     ctx.save();
-    ctx.translate(pose.x + shakeX, pose.y - (selected ? cs * 0.08 : 0));
-    ctx.rotate(pose.angle);
-    ctx.scale(scale, scale);
+    ctx.translate(pose.x + shakeX, pose.y);
 
-    const rad = cs * 0.24;
-
+    // ---- contact shadow (screen space, under the whole block) ----
     if (!ghost) {
-      // Soft two-layer drop shadow.
-      ctx.fillStyle = 'rgba(20,30,45,0.12)';
-      this.rr(-L / 2 - cs * 0.04, -W / 2 + cs * (selected ? 0.2 : 0.12), L + cs * 0.08, W, rad * 1.2);
-      ctx.fill();
-      ctx.fillStyle = 'rgba(20,30,45,0.2)';
-      this.rr(-L / 2 + cs * 0.03, -W / 2 + cs * (selected ? 0.16 : 0.09), L - cs * 0.02, W * 0.94, rad);
-      ctx.fill();
+      ctx.fillStyle = 'rgba(14,20,32,0.13)';
+      ctx.beginPath();
+      ctx.ellipse(cs * 0.06, sh / 2 + depth * 0.7, sw * 0.56, sh * 0.4, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(14,20,32,0.16)';
+      ctx.beginPath();
+      ctx.ellipse(cs * 0.04, sh / 2 + depth * 0.5, sw * 0.48, sh * 0.32, 0, 0, Math.PI * 2); ctx.fill();
+    }
 
-      // Wheels peeking out on both sides.
-      ctx.fillStyle = '#252d38';
-      const ww = cs * 0.3, wh = cs * 0.12, wx = L / 2 - cs * 0.42, wy = W / 2 - cs * 0.02;
-      for (const sx of [-1, 1]) {
-        for (const sy of [-1, 1]) {
-          this.rr(sx * wx - ww / 2, sy * wy - wh / 2, ww, wh, wh / 2);
+    // ---- extruded side/base gives the toy-3D height ----
+    if (!ghost) {
+      const side = ctx.createLinearGradient(0, -sh / 2 - lift, 0, sh / 2 - lift + depth);
+      side.addColorStop(0, this.lighten(veh.color, -0.28));
+      side.addColorStop(1, this.lighten(veh.color, -0.5));
+      ctx.fillStyle = side;
+      this.rr(-sw / 2, -sh / 2 - lift + depth * 0.15, sw, sh + depth * 0.9, rad);
+      ctx.fill();
+      // wheel nubs poking out along the two long sides
+      ctx.fillStyle = '#20262f';
+      const along = horiz ? sw : sh;
+      const positions = [-along * 0.3, along * 0.3];
+      for (const p of positions) {
+        for (const s of [-1, 1]) {
+          const wx = horiz ? p : s * (sw / 2);
+          const wy = horiz ? s * (sh / 2) : p;
+          const ww = horiz ? cs * 0.2 : cs * 0.1, wh = horiz ? cs * 0.1 : cs * 0.2;
+          this.rr(wx - ww / 2, wy - wh / 2 - lift + depth * 0.5, ww, wh, cs * 0.05);
           ctx.fill();
         }
       }
     }
 
-    // Selection / hint glow; movable cars get a subtle ready-to-go glow.
+    // ---- top face (rotated + scaled) ----
+    ctx.save();
+    ctx.translate(0, -lift);
+    ctx.rotate(pose.angle);
+    ctx.scale(scale, scale);
+
+    // Ready-to-move / selection / hint glow behind the body.
     if (selected || hinted) {
       ctx.shadowColor = selected ? 'rgba(255,255,255,0.95)' : 'rgba(255,201,60,0.95)';
-      ctx.shadowBlur = cs * 0.5;
+      ctx.shadowBlur = cs * 0.55;
     } else if (movable && !ghost) {
-      // Very subtle "this one can move" hint — not a spotlight.
-      ctx.shadowColor = `rgba(180,240,210,${0.22 + 0.1 * Math.sin(t * 0.005)})`;
-      ctx.shadowBlur = cs * 0.16;
+      ctx.shadowColor = `rgba(170,240,205,${0.24 + 0.12 * Math.sin(t * 0.005)})`;
+      ctx.shadowBlur = cs * 0.2;
     }
 
-    // Body with a top-lit candy gradient.
+    // Glossy top-lit candy body.
     const grad = ctx.createLinearGradient(0, -W / 2, 0, W / 2);
-    grad.addColorStop(0, this.lighten(veh.color, 0.42));
-    grad.addColorStop(0.45, this.lighten(veh.color, 0.08));
-    grad.addColorStop(1, this.lighten(veh.color, -0.25));
+    grad.addColorStop(0, this.lighten(veh.color, 0.5));
+    grad.addColorStop(0.42, this.lighten(veh.color, 0.12));
+    grad.addColorStop(1, this.lighten(veh.color, -0.14));
     ctx.fillStyle = grad;
-    this.rr(-L / 2, -W / 2, L, W, rad);
-    ctx.fill();
+    this.rr(-L / 2, -W / 2, L, W, rad); ctx.fill();
     ctx.shadowBlur = 0;
     ctx.lineWidth = Math.max(1.5, cs * 0.05);
-    ctx.strokeStyle = this.lighten(veh.color, -0.42);
-    this.rr(-L / 2, -W / 2, L, W, rad);
-    ctx.stroke();
+    ctx.strokeStyle = this.lighten(veh.color, -0.4);
+    this.rr(-L / 2, -W / 2, L, W, rad); ctx.stroke();
 
-    // Pulsing white ring around the selected car.
+    if (ghost) ctx.globalAlpha *= 1;   // (ghost alpha applied by caller)
+
+    // Tinted glass with a bright reflection sweep.
+    const glassFill = (x, y, gw, gh, gr) => {
+      const gg = ctx.createLinearGradient(x, y, x + gw, y + gh);
+      gg.addColorStop(0, '#4a6486');
+      gg.addColorStop(1, '#1d2c3f');
+      ctx.fillStyle = gg;
+      this.rr(x, y, gw, gh, gr); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      this.rr(x + gw * 0.12, y + gh * 0.12, gw * 0.34, gh * 0.28, gr * 0.6); ctx.fill();
+    };
+
+    const kind = veh.len >= 4 ? 'truck' : veh.kind === 'van' || veh.len === 3 ? 'van' : 'car';
+    if (kind === 'truck') {
+      // Cab up front + long ribbed container.
+      ctx.fillStyle = this.lighten(veh.color, 0.24);
+      this.rr(-L * 0.5, -W * 0.4, L * 0.66, W * 0.8, rad * 0.5); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = cs * 0.03;
+      for (let i = 1; i < 5; i++) { const x = -L * 0.44 + i * L * 0.12; ctx.beginPath(); ctx.moveTo(x, -W * 0.32); ctx.lineTo(x, W * 0.32); ctx.stroke(); }
+      ctx.fillStyle = this.lighten(veh.color, -0.1);
+      this.rr(L * 0.18, -W * 0.42, L * 0.14, W * 0.84, rad * 0.4); ctx.fill();   // cab roof
+      glassFill(L * 0.3, -W * 0.34, L * 0.1, W * 0.68, cs * 0.06);
+    } else if (kind === 'van') {
+      ctx.fillStyle = this.lighten(veh.color, 0.26);
+      this.rr(-L * 0.46, -W * 0.4, L * 0.62, W * 0.8, rad * 0.5); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.1)'; ctx.lineWidth = cs * 0.03;
+      for (let i = 0; i < 3; i++) { const x = -L * 0.36 + i * L * 0.16; ctx.beginPath(); ctx.moveTo(x, -W * 0.3); ctx.lineTo(x, W * 0.3); ctx.stroke(); }
+      glassFill(L * 0.2, -W * 0.34, L * 0.16, W * 0.68, cs * 0.07);
+    } else {
+      const cab = L * (variant === 0 ? 0.48 : 0.54);
+      ctx.fillStyle = this.lighten(veh.color, 0.26);
+      this.rr(-cab / 2, -W * 0.38, cab, W * 0.76, rad * 0.62); ctx.fill();
+      glassFill(cab / 2 - L * 0.14, -W * 0.32, L * 0.115, W * 0.64, cs * 0.07);   // windshield
+      glassFill(-cab / 2 + L * 0.02, -W * 0.32, L * 0.09, W * 0.64, cs * 0.07);   // rear glass
+      // roof detail varies per car (sunroof / centre stripe / plain)
+      if (variant === 1) { ctx.fillStyle = '#26374a'; this.rr(-cab * 0.16, -W * 0.24, cab * 0.32, W * 0.48, cs * 0.05); ctx.fill(); }
+      else if (variant === 2) { ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.fillRect(-cab * 0.28, -W * 0.06, cab * 0.56, W * 0.12); }
+      ctx.fillStyle = '#2b3d52';
+      this.rr(-cab * 0.2, -W * 0.38, cab * 0.4, W * 0.09, cs * 0.03); ctx.fill();
+      this.rr(-cab * 0.2, W * 0.29, cab * 0.4, W * 0.09, cs * 0.03); ctx.fill();
+    }
+
+    // Long glossy highlight streak.
+    ctx.fillStyle = 'rgba(255,255,255,0.26)';
+    this.rr(-L / 2 + cs * 0.1, -W / 2 + cs * 0.05, L - cs * 0.45, W * 0.17, rad * 0.5); ctx.fill();
+
+    // Headlights (front = +x) + taillights.
+    ctx.fillStyle = '#fff6d0';
+    this.rr(L / 2 - cs * 0.11, -W * 0.36, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
+    this.rr(L / 2 - cs * 0.11, W * 0.16, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
+    ctx.fillStyle = '#ff6459';
+    this.rr(-L / 2 + cs * 0.03, -W * 0.34, cs * 0.055, W * 0.18, cs * 0.02); ctx.fill();
+    this.rr(-L / 2 + cs * 0.03, W * 0.16, cs * 0.055, W * 0.18, cs * 0.02); ctx.fill();
+
+    // Blocked traffic reads darker so movable cars pop.
+    if (!movable && !ghost && !selected) {
+      ctx.fillStyle = 'rgba(20,28,42,0.32)';
+      this.rr(-L / 2, -W / 2, L, W, rad); ctx.fill();
+    }
+    ctx.restore();
+
+    // ---- overlays in screen space ----
     if (selected) {
       ctx.strokeStyle = `rgba(255,255,255,${0.55 + 0.3 * Math.sin(t * 0.012)})`;
       ctx.lineWidth = cs * 0.07;
-      this.rr(-L / 2 - cs * 0.09, -W / 2 - cs * 0.09, L + cs * 0.18, W + cs * 0.18, rad + cs * 0.09);
+      this.rr(-sw / 2 - cs * 0.1, -sh / 2 - cs * 0.1 - lift, sw + cs * 0.2, sh + cs * 0.2, rad + cs * 0.1);
       ctx.stroke();
     }
-
-    // Tinted glass with a white reflection notch.
-    const glassFill = (x, y, gw, gh, gr) => {
-      const gg = ctx.createLinearGradient(x, y, x, y + gh);
-      gg.addColorStop(0, '#3d5570');
-      gg.addColorStop(1, '#1f2f42');
-      ctx.fillStyle = gg;
-      this.rr(x, y, gw, gh, gr); ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,0.35)';
-      this.rr(x + gw * 0.12, y + gh * 0.1, gw * 0.32, gh * 0.3, gr * 0.6); ctx.fill();
-    };
-
-    if (veh.kind === 'van') {
-      // Boxy cargo behind, cab glass at the front.
-      ctx.fillStyle = 'rgba(255,255,255,0.3)';
-      this.rr(-L * 0.46, -W * 0.38, L * 0.6, W * 0.76, rad * 0.5); ctx.fill();
-      ctx.fillStyle = this.lighten(veh.color, 0.2);
-      this.rr(-L * 0.44, -W * 0.34, L * 0.56, W * 0.68, rad * 0.45); ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,0.1)';
-      ctx.lineWidth = cs * 0.03;
-      for (let i = 0; i < 3; i++) {
-        const x = -L * 0.36 + i * L * 0.16;
-        ctx.beginPath(); ctx.moveTo(x, -W * 0.3); ctx.lineTo(x, W * 0.3); ctx.stroke();
-      }
-      glassFill(L * 0.2, -W * 0.36, L * 0.16, W * 0.72, cs * 0.08);
-    } else {
-      // Car / long car: rounded cabin, windshield, rear and side glass.
-      const cab = veh.len >= 3 ? L * 0.52 : L * 0.5;
-      ctx.fillStyle = this.lighten(veh.color, 0.22);
-      this.rr(-cab / 2, -W * 0.37, cab, W * 0.74, rad * 0.6); ctx.fill();
-      glassFill(cab / 2 - L * 0.13, -W * 0.33, L * 0.11, W * 0.66, cs * 0.07);
-      glassFill(-cab / 2 + L * 0.015, -W * 0.33, L * 0.09, W * 0.66, cs * 0.07);
-      ctx.fillStyle = '#2b3d52';
-      this.rr(-cab * 0.22, -W * 0.37, cab * 0.44, W * 0.1, cs * 0.03); ctx.fill();
-      this.rr(-cab * 0.22, W * 0.27, cab * 0.44, W * 0.1, cs * 0.03); ctx.fill();
-      if (veh.len >= 3) {
-        // Roof rails on the long car.
-        ctx.strokeStyle = 'rgba(0,0,0,0.15)';
-        ctx.lineWidth = cs * 0.035;
-        ctx.beginPath(); ctx.moveTo(-cab * 0.18, -W * 0.18); ctx.lineTo(cab * 0.18, -W * 0.18); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(-cab * 0.18, W * 0.18); ctx.lineTo(cab * 0.18, W * 0.18); ctx.stroke();
-      }
-    }
-
-    // Glossy highlight streak along the top edge.
-    ctx.fillStyle = 'rgba(255,255,255,0.22)';
-    this.rr(-L / 2 + cs * 0.08, -W / 2 + cs * 0.05, L - cs * 0.4, W * 0.2, rad * 0.5);
-    ctx.fill();
-
-    // Headlights (front = +x) and taillights.
-    ctx.fillStyle = '#fff3c4';
-    this.rr(L / 2 - cs * 0.1, -W * 0.36, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
-    this.rr(L / 2 - cs * 0.1, W * 0.16, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
-    ctx.fillStyle = '#ff6459';
-    this.rr(-L / 2 + cs * 0.02, -W * 0.34, cs * 0.06, W * 0.18, cs * 0.02); ctx.fill();
-    this.rr(-L / 2 + cs * 0.02, W * 0.16, cs * 0.06, W * 0.18, cs * 0.02); ctx.fill();
-
-    // Blocked traffic sits darker so the movable car stands out.
-    if (!movable && !ghost && !selected) {
-      ctx.fillStyle = 'rgba(22,30,44,0.30)';
-      this.rr(-L / 2, -W / 2, L, W, rad);
-      ctx.fill();
-    }
-
-    // Freshly unlocked: a bright expanding ring.
     if (veh.unlockT > 0 && !ghost) {
       const u = 1 - veh.unlockT;
       ctx.strokeStyle = `rgba(255,235,140,${veh.unlockT})`;
       ctx.lineWidth = cs * 0.09;
-      this.rr(-L / 2 - u * cs * 0.35, -W / 2 - u * cs * 0.35,
-              L + u * cs * 0.7, W + u * cs * 0.7, rad + u * cs * 0.35);
+      this.rr(-sw / 2 - u * cs * 0.4, -sh / 2 - u * cs * 0.4 - lift, sw + u * cs * 0.8, sh + u * cs * 0.8, rad + u * cs * 0.4);
       ctx.stroke();
     }
 
@@ -1770,111 +1832,121 @@ class Renderer {
     const g = this.game, ctx = this.ctx, { cs } = this.view;
     const amb = g.ambulance;
     const pose = amb.px;
-    const L = amb.len * cs - cs * 0.16;
-    const W = cs * 0.86;
+    const horiz = Math.abs(pose.angle) < 0.01;   // always vertical in play, but stay general
+    const L = amb.len * cs - cs * 0.12;
+    const W = cs * 0.9;                            // the hero is a touch wider
+    const sw = horiz ? L : W, sh = horiz ? W : L;
     const on = amb.lights;
-    const phase = Math.floor(t / 130) % 2 === 0;
+    const phase = Math.floor(t / 120) % 2 === 0;
     const skin = g.currentSkin();
+    const depth = cs * 0.2;                        // taller extrusion than civilians
 
     ctx.save();
     ctx.translate(pose.x, pose.y);
-    ctx.rotate(pose.angle);
 
-    // Soft double shadow (the hero vehicle gets the strongest one).
-    ctx.fillStyle = 'rgba(20,30,45,0.14)';
-    this.rr(-L / 2 - cs * 0.05, -W / 2 + cs * 0.15, L + cs * 0.1, W, cs * 0.26); ctx.fill();
-    ctx.fillStyle = 'rgba(20,30,45,0.24)';
-    this.rr(-L / 2 + cs * 0.03, -W / 2 + cs * 0.1, L - cs * 0.02, W * 0.94, cs * 0.22); ctx.fill();
+    // Coloured light spill on the road (under everything) when racing.
+    if (on) {
+      ctx.globalAlpha = 0.35 + 0.2 * Math.sin(t * 0.03);
+      const spill = ctx.createRadialGradient(0, 0, cs * 0.2, 0, 0, cs * 1.6);
+      spill.addColorStop(0, phase ? 'rgba(255,70,60,0.5)' : 'rgba(80,150,255,0.5)');
+      spill.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = spill;
+      ctx.beginPath(); ctx.arc(0, 0, cs * 1.6, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
 
+    // Strong contact shadow.
+    ctx.fillStyle = 'rgba(12,18,30,0.16)';
+    ctx.beginPath(); ctx.ellipse(cs * 0.06, sh / 2 + depth * 0.7, sw * 0.62, sh * 0.42, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(12,18,30,0.2)';
+    ctx.beginPath(); ctx.ellipse(cs * 0.04, sh / 2 + depth * 0.5, sw * 0.52, sh * 0.34, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Extruded side/base.
+    const side = ctx.createLinearGradient(0, -sh / 2, 0, sh / 2 + depth);
+    side.addColorStop(0, '#c2ccd6');
+    side.addColorStop(1, '#93a0ad');
+    ctx.fillStyle = side;
+    this.rr(-sw / 2, -sh / 2 + depth * 0.15, sw, sh + depth * 0.9, cs * 0.22); ctx.fill();
     // Wheels.
-    ctx.fillStyle = '#252d38';
-    const ww = cs * 0.32, wh = cs * 0.13;
-    for (const sx of [-1, 1]) {
-      for (const sy of [-1, 1]) {
-        this.rr(sx * (L / 2 - cs * 0.42) - ww / 2, sy * (W / 2 - cs * 0.015) - wh / 2, ww, wh, wh / 2);
+    ctx.fillStyle = '#20262f';
+    for (const p of [-sh * 0.3, sh * 0.3]) {
+      for (const s of [-1, 1]) {
+        this.rr(s * (sw / 2) - cs * 0.05, p - cs * 0.1 + depth * 0.5, cs * 0.1, cs * 0.2, cs * 0.05);
         ctx.fill();
       }
     }
 
-    // Body (skin-tinted gradient).
+    // ---- top face ----
+    ctx.save();
+    ctx.rotate(pose.angle);
+
     const grad = ctx.createLinearGradient(0, -W / 2, 0, W / 2);
-    grad.addColorStop(0, skin.body[0]);
-    grad.addColorStop(0.6, this.lighten(skin.body[1], 0.12));
+    grad.addColorStop(0, this.lighten(skin.body[0], 0.06));
+    grad.addColorStop(0.55, skin.body[0]);
     grad.addColorStop(1, skin.body[1]);
     ctx.fillStyle = grad;
-    this.rr(-L / 2, -W / 2, L, W, cs * 0.2); ctx.fill();
+    this.rr(-L / 2, -W / 2, L, W, cs * 0.22); ctx.fill();
     ctx.lineWidth = Math.max(1.5, cs * 0.05);
-    ctx.strokeStyle = this.lighten(skin.body[1], -0.28);
-    this.rr(-L / 2, -W / 2, L, W, cs * 0.2); ctx.stroke();
+    ctx.strokeStyle = this.lighten(skin.body[1], -0.3);
+    this.rr(-L / 2, -W / 2, L, W, cs * 0.22); ctx.stroke();
 
-    // Side stripes + tail accent block (skin colours).
+    // Side stripes + tail accent.
     ctx.fillStyle = skin.stripe;
-    ctx.fillRect(-L / 2 + cs * 0.08, -W / 2 + cs * 0.055, L - cs * 0.3, cs * 0.09);
-    ctx.fillRect(-L / 2 + cs * 0.08, W / 2 - cs * 0.145, L - cs * 0.3, cs * 0.09);
+    ctx.fillRect(-L / 2 + cs * 0.08, -W / 2 + cs * 0.06, L - cs * 0.3, cs * 0.1);
+    ctx.fillRect(-L / 2 + cs * 0.08, W / 2 - cs * 0.16, L - cs * 0.3, cs * 0.1);
     ctx.fillStyle = skin.accent;
     ctx.fillRect(-L / 2 + cs * 0.04, -W * 0.3, cs * 0.07, W * 0.6);
 
-    // Roof module with the medical cross.
-    ctx.fillStyle = this.lighten(skin.body[0], 0.12);
-    this.rr(-L * 0.44, -W * 0.35, L * 0.6, W * 0.7, cs * 0.12); ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.12)';
-    ctx.lineWidth = Math.max(1, cs * 0.03);
-    this.rr(-L * 0.44, -W * 0.35, L * 0.6, W * 0.7, cs * 0.12); ctx.stroke();
+    // Roof module + medical cross.
+    ctx.fillStyle = this.lighten(skin.body[0], 0.14);
+    this.rr(-L * 0.44, -W * 0.36, L * 0.58, W * 0.72, cs * 0.12); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = Math.max(1, cs * 0.03);
+    this.rr(-L * 0.44, -W * 0.36, L * 0.58, W * 0.72, cs * 0.12); ctx.stroke();
     ctx.fillStyle = skin.cross;
-    const cw = W * 0.34, ct2 = W * 0.115, ccx = -L * 0.14;
+    const cw = W * 0.36, ct2 = W * 0.12, ccx = -L * 0.15;
     this.rr(ccx - cw / 2, -ct2 / 2, cw, ct2, ct2 * 0.3); ctx.fill();
     this.rr(ccx - ct2 / 2, -cw / 2, ct2, cw, ct2 * 0.3); ctx.fill();
 
+    // Glossy body highlight.
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    this.rr(-L / 2 + cs * 0.1, -W / 2 + cs * 0.05, L - cs * 0.5, W * 0.16, cs * 0.08); ctx.fill();
+
     // Windshield with reflection.
-    const gg = ctx.createLinearGradient(L * 0.22, 0, L * 0.36, 0);
-    gg.addColorStop(0, '#42597a');
-    gg.addColorStop(1, '#243447');
+    const gg = ctx.createLinearGradient(L * 0.22, -W * 0.3, L * 0.36, W * 0.3);
+    gg.addColorStop(0, '#4a6486'); gg.addColorStop(1, '#233246');
     ctx.fillStyle = gg;
-    this.rr(L * 0.22, -W * 0.33, L * 0.13, W * 0.66, cs * 0.07); ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
-    this.rr(L * 0.23, -W * 0.3, L * 0.045, W * 0.28, cs * 0.04); ctx.fill();
+    this.rr(L * 0.22, -W * 0.32, L * 0.13, W * 0.64, cs * 0.07); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    this.rr(L * 0.235, -W * 0.28, L * 0.045, W * 0.26, cs * 0.04); ctx.fill();
 
-    // Light bar: dark base with red + blue lamps; strobes + bloom when active.
-    ctx.fillStyle = '#33404f';
-    this.rr(L * 0.1, -W * 0.36, cs * 0.13, W * 0.72, cs * 0.04); ctx.fill();
-    if (on) {
-      ctx.save();
-      ctx.shadowBlur = cs * 0.5;
-      ctx.shadowColor = phase ? 'rgba(255,60,50,0.95)' : 'rgba(255,60,50,0.2)';
-      ctx.fillStyle = phase ? '#ff453a' : '#7a1f1f';
-      this.rr(L * 0.105, -W * 0.34, cs * 0.11, W * 0.31, cs * 0.03); ctx.fill();
-      ctx.shadowColor = !phase ? 'rgba(70,140,255,0.95)' : 'rgba(70,140,255,0.2)';
-      ctx.fillStyle = !phase ? '#3f8bff' : '#1d3766';
-      this.rr(L * 0.105, W * 0.03, cs * 0.11, W * 0.31, cs * 0.03); ctx.fill();
-      ctx.restore();
-      // Rotating ground bloom.
-      ctx.globalAlpha = 0.3 + 0.2 * Math.sin(t * 0.03);
-      ctx.fillStyle = phase ? 'rgba(255,70,60,0.5)' : 'rgba(80,150,255,0.5)';
-      ctx.beginPath(); ctx.arc(L * 0.16, 0, cs * 0.7, 0, Math.PI * 2); ctx.fill();
-      ctx.globalAlpha = 1;
-    } else {
-      ctx.fillStyle = '#a04038';
-      this.rr(L * 0.105, -W * 0.34, cs * 0.11, W * 0.31, cs * 0.03); ctx.fill();
-      ctx.fillStyle = '#33518f';
-      this.rr(L * 0.105, W * 0.03, cs * 0.11, W * 0.31, cs * 0.03); ctx.fill();
-    }
+    // Light bar with red + blue lamps; strobes + bloom when active.
+    ctx.fillStyle = '#2c3746';
+    this.rr(L * 0.08, -W * 0.38, cs * 0.16, W * 0.76, cs * 0.05); ctx.fill();
+    ctx.save();
+    if (on) ctx.shadowBlur = cs * 0.6;
+    ctx.shadowColor = phase ? 'rgba(255,60,50,0.95)' : 'rgba(255,60,50,0.15)';
+    ctx.fillStyle = on ? (phase ? '#ff4a3f' : '#8a2420') : '#a04038';
+    this.rr(L * 0.09, -W * 0.36, cs * 0.14, W * 0.33, cs * 0.04); ctx.fill();
+    ctx.shadowColor = !phase ? 'rgba(70,140,255,0.95)' : 'rgba(70,140,255,0.15)';
+    ctx.fillStyle = on ? (!phase ? '#4a92ff' : '#22407a') : '#33518f';
+    this.rr(L * 0.09, W * 0.03, cs * 0.14, W * 0.33, cs * 0.04); ctx.fill();
+    ctx.restore();
 
-    // Headlights + light beams while racing.
-    ctx.fillStyle = '#fff3c4';
-    this.rr(L / 2 - cs * 0.1, -W * 0.34, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
-    this.rr(L / 2 - cs * 0.1, W * 0.14, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
+    // Headlights + beams while racing.
+    ctx.fillStyle = '#fff6d0';
+    this.rr(L / 2 - cs * 0.11, -W * 0.34, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
+    this.rr(L / 2 - cs * 0.11, W * 0.14, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
     if (on) {
-      ctx.fillStyle = 'rgba(255,240,180,0.16)';
+      ctx.fillStyle = 'rgba(255,240,180,0.18)';
       for (const sy of [-1, 1]) {
         ctx.beginPath();
         ctx.moveTo(L / 2 - cs * 0.02, sy * W * 0.24);
-        ctx.lineTo(L / 2 + cs * 0.95, sy * W * 0.52);
-        ctx.lineTo(L / 2 + cs * 0.95, sy * W * 0.04);
-        ctx.closePath();
-        ctx.fill();
+        ctx.lineTo(L / 2 + cs * 1.1, sy * W * 0.54);
+        ctx.lineTo(L / 2 + cs * 1.1, sy * W * 0.02);
+        ctx.closePath(); ctx.fill();
       }
     }
-
+    ctx.restore();
     ctx.restore();
   }
 
@@ -2401,6 +2473,7 @@ class Game {
       this.ui.updateUndo(true);
       this.audio.park();
       this.particles.sparkle(veh.px.x, veh.px.y, 10);
+      this.particles.dust(veh.px.x, veh.px.y, 12);
 
       // Chain reaction: find vehicles this move just unlocked and celebrate them.
       const before = this.movableIds;
