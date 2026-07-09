@@ -59,7 +59,30 @@ The **Hint** recommends the strategically correct move (the first step of an
 optimal solution, never a decoy) and shows a short reason such as *“Keep the
 long bay free for a bigger vehicle.”*
 
-## Endless mode — infinite generated puzzles
+## Infinite levels
+
+There are two ways the game never runs out of levels:
+
+- **The campaign is endless.** After the 5 curated levels, "Next Level" keeps
+  going into generated, numbered levels (Level 6, 7, 8, …) with a difficulty
+  ramp. Each numbered level is **deterministic and cached** (same number → same
+  board, so replay/restart are stable), starts with 2–4 movable cars like the
+  curated ones, and saves its own best score. The level-select grid grows as you
+  unlock more, and the next level is pre-generated during the win panel so
+  "Next" is instant.
+- **Endless mode** — the **∞ ENDLESS** button on the menu is a separate
+  streak-based run: a fresh, always-solvable puzzle every round with its own
+  saved best round.
+
+### Getting unstuck
+
+Because levels contain traps, you can box the ambulance in. When there's no
+longer any way to clear the route, a **"No way through!"** screen appears
+offering to **watch an ad to undo your last move and get a hint**, undo for
+free, or restart. (Stuck detection runs the solver from the live position, so
+it only triggers when you're genuinely trapped.)
+
+### Endless mode — infinite generated puzzles
 
 The **∞ ENDLESS** button on the menu generates a fresh, always-solvable puzzle
 every round, with difficulty ramping as your streak grows (best round is saved).

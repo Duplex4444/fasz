@@ -444,6 +444,7 @@ html,body{
 .ad-reward b{ color:var(--accent); }
 
 .offer-gift{ font-size:3rem; animation:adbob 1.6s ease-in-out infinite; }
+.stuck-icon{ font-size:3rem; margin-bottom:4px; }
 
 /* Stars */
 .stars{ display:flex; justify-content:center; gap:10px; margin:4px 0 14px; }

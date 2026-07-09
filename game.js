@@ -854,6 +854,8 @@ class UIManager {
       adCount: $('adCount'), adSkip: $('adSkip'), adClaim: $('adClaim'),
       panelAdOffer: $('panelAdOffer'), adOfferReward: $('adOfferReward'),
       btnAdOfferWatch: $('btnAdOfferWatch'), btnAdOfferSkip: $('btnAdOfferSkip'),
+      panelStuck: $('panelStuck'), btnStuckAd: $('btnStuckAd'),
+      btnStuckUndo: $('btnStuckUndo'), btnStuckRestart: $('btnStuckRestart'),
     };
     this.toastTimer = null;
     this.confirmCb = null;
@@ -886,7 +888,7 @@ class UIManager {
   }
   hideAllPanels() {
     for (const p of [this.el.panelPause, this.el.panelComplete, this.el.panelMenu, this.el.panelConfirm,
-                     this.el.panelShop, this.el.panelAd, this.el.panelAdOffer]) {
+                     this.el.panelShop, this.el.panelAd, this.el.panelAdOffer, this.el.panelStuck]) {
       p.classList.add('hidden');
     }
     this.el.overlay.classList.add('hidden');
@@ -913,25 +915,30 @@ class UIManager {
     this.el.btnNext.textContent = endless ? 'NEXT MAP' : isLast ? 'MAIN MENU' : 'NEXT LEVEL';
     this.showPanel(this.el.panelComplete);
   }
-  showMenu(save, levels, onPick, soundOn, onEndless, onShop) {
+  showMenu(save, curatedCount, onPick, soundOn, onEndless, onShop) {
     this.el.btnMenuSound.textContent = 'SOUND: ' + (soundOn ? 'ON' : 'OFF');
     this.el.btnShop.onclick = onShop;
     const grid = this.el.levelGrid;
     grid.innerHTML = '';
-    levels.forEach((lv, i) => {
+    // Infinite campaign: show every unlocked level plus one locked "next",
+    // capped so the grid stays light. The panel scrolls if it grows.
+    const unlocked = save.data.unlocked;
+    const count = Math.min(60, Math.max(curatedCount, unlocked) + 1);
+    for (let i = 0; i < count; i++) {
+      const n = i + 1;
+      const isUnlocked = i < unlocked;
       const btn = document.createElement('button');
-      const unlocked = i < save.data.unlocked;
-      btn.className = 'level-cell' + (unlocked ? '' : ' locked');
-      const best = save.data.best[lv.id];
+      btn.className = 'level-cell' + (isUnlocked ? '' : ' locked');
+      const best = save.data.best[n];
       const stars = best ? best.stars : 0;
-      btn.innerHTML = unlocked
-        ? `${lv.id}<span class="lv-stars">` +
+      btn.innerHTML = isUnlocked
+        ? `${n}<span class="lv-stars">` +
           [0, 1, 2].map(s => `<span class="${s < stars ? 'on' : ''}">★</span>`).join('') +
           '</span>'
         : '🔒';
-      if (unlocked) btn.addEventListener('click', () => onPick(i));
+      if (isUnlocked) btn.addEventListener('click', () => onPick(i));
       grid.appendChild(btn);
-    });
+    }
     const eb = this.el.btnEndless;
     const rec = save.data.endlessBest || 0;
     eb.innerHTML = '∞ ENDLESS<span class="endless-sub">' +
@@ -981,7 +988,7 @@ class UIManager {
     let left = TUNE.adWatchSecs;
     const skip = this.el.adSkip, claim = this.el.adClaim, count = this.el.adCount;
     this.el.adReason.textContent = reason || 'Reward';
-    this.el.adReward.textContent = '+' + reward + ' coins';
+    this.el.adReward.textContent = reward > 0 ? '+' + reward + ' coins' : 'Undo + free hint';
     claim.classList.add('hidden');
     skip.classList.add('hidden');
     count.textContent = left + 's';
@@ -1006,6 +1013,15 @@ class UIManager {
     this.el.btnAdOfferWatch.onclick = cb.onWatch;
     this.el.btnAdOfferSkip.onclick = cb.onSkip;
     this.showPanel(this.el.panelAdOffer);
+  }
+
+  /* ---- "you're stuck" screen: ad-help, undo, or restart ---- */
+  showStuck(cb) {
+    this.el.btnStuckUndo.style.display = cb.canUndo ? '' : 'none';
+    this.el.btnStuckAd.onclick = cb.onAd;
+    this.el.btnStuckUndo.onclick = cb.onUndo;
+    this.el.btnStuckRestart.onclick = cb.onRestart;
+    this.showPanel(this.el.panelStuck);
   }
 }
 
@@ -2089,7 +2105,7 @@ class Game {
     }, 60);
 
     // Start on the first level the player has not beaten yet.
-    const start = clamp(this.save.data.unlocked - 1, 0, LEVELS.length - 1);
+    const start = Math.max(0, this.save.data.unlocked - 1);
     this.loadLevel(start);
     this.startAdOffers();
 
@@ -2104,8 +2120,8 @@ class Game {
   }
 
   /* ------------------------------- helpers ------------------------------- */
-  levelDef() { return this.endless ? this.genDef : LEVELS[this.levelIndex]; }
-  hudLabel() { return this.endless ? 'ENDLESS #' + this.endlessRound : 'LEVEL ' + this.levelDef().id; }
+  levelDef() { return this.loadedDef; }
+  hudLabel() { return this.endless ? 'ENDLESS #' + this.endlessRound : 'LEVEL ' + (this.levelIndex + 1); }
   vehicleById(id) { return this.vehicles.find(v => v.id === id); }
   spaceById(id) { return this.spaces.find(s => s.id === id); }
   inputAllowed() { return this.state === 'waiting' || this.state === 'selected'; }
@@ -2148,7 +2164,33 @@ class Game {
   loadLevel(idx) {
     this.endless = false;
     this.levelIndex = idx;
-    this.loadDef(LEVELS[idx]);
+    // The campaign is infinite: the 5 curated levels, then endlessly generated
+    // numbered levels with a difficulty ramp (deterministic + cached per index).
+    this.loadDef(idx < LEVELS.length ? LEVELS[idx] : this.genCampaignLevel(idx));
+  }
+
+  /** Deterministic, cached generated level for campaign slots past the curated 5. */
+  genCampaignLevel(idx) {
+    if (!this.campaignCache) this.campaignCache = new Map();
+    if (this.campaignCache.has(idx)) return this.campaignCache.get(idx);
+    const n = idx + 1;
+    const cars = clamp(12 + Math.floor((n - 6) / 2), 12, 16);
+    const base = (n * 2654435761) >>> 0;
+    let def = null;
+    for (let k = 0; k < 40 && !def; k++) {
+      const cand = generateLevel((base + k * 2246822519) >>> 0,
+        { cars, tries: 200, strict: { movable: 4, movers: 0.55, depth: 0.5 } });
+      if (!cand) continue;
+      const board = parseBoard(cand);
+      const vs = cand.vehicles.map(v => ({ ...v }));
+      vs.push({ id: AMB_ID, r: cand.ambulance.r, c: cand.ambulance.c, orient: 'v', len: 2 });
+      const sm = movableVehicles(board, vs, cand.spaces).length;
+      if (sm >= 2 && sm <= 4) def = cand;          // ensure a real choice
+    }
+    if (!def) def = generateLevel(base, { cars }) || generateLevel((base + 7) >>> 0, { cars: 10 });
+    def.id = n; def.name = 'Level ' + n; def.tutorial = null; def.generated = true;
+    this.campaignCache.set(idx, def);
+    return def;
   }
 
   /** Enter Endless mode: infinite freshly generated puzzles. */
@@ -2169,6 +2211,7 @@ class Game {
   }
 
   loadDef(def) {
+    this.loadedDef = def;
     this.seedNum = typeof def.id === 'number' ? def.id : 900 + (this.endlessRound || 0);
     this.board = parseBoard(def);
     this.vehicles = def.vehicles.map(v => ({
@@ -2389,7 +2432,33 @@ class Game {
       this.startAmbulance();
     } else {
       this.setState('waiting');
+      this.checkStuck();
     }
+  }
+
+  /** After a move, detect a dead end (no way to clear the route from here) and
+      offer the player a way out: ad-help, undo, or restart. */
+  checkStuck() {
+    if (this.moves === 0) return;                 // fresh board is always solvable
+    // Generous depth so we never falsely tell a player they're stuck.
+    const depth = Math.max(TUNE.solverMaxDepth, this.vehicles.length + 6);
+    const solvable = solveLevel(this.board, this.allObstacles(), this.spaces, depth);
+    if (solvable) return;
+    this.audio.invalid();
+    this.setState('paused');
+    this.ui.showStuck({
+      canUndo: this.history.length > 0,
+      onAd: () => this.watchAd(0, 'Get unstuck', () => { this.ui.hideAllPanels(); this.setState('waiting'); this.undo(); this.freeHintSoon(); }),
+      onUndo: () => { this.audio.click(); this.ui.hideAllPanels(); this.setState('waiting'); this.undo(); },
+      onRestart: () => { this.audio.click(); this.ui.hideAllPanels(); this.doRestart(); },
+    });
+  }
+
+  /** Give a free hint shortly after an undo (used by the "get unstuck" ad). */
+  freeHintSoon() {
+    setTimeout(() => {
+      if (this.state === 'waiting') { this.hintsLeft++; this.hint(); }
+    }, 650);
   }
 
   /* ------------------------------ ambulance ------------------------------ */
@@ -2451,9 +2520,13 @@ class Game {
       if (!prev || stars > prev.stars || (stars === prev.stars && this.moves < prev.moves)) {
         this.save.data.best[def.id] = { stars, moves: this.moves };
       }
-      this.save.data.unlocked = clamp(
-        Math.max(this.save.data.unlocked, this.levelIndex + 2), 1, LEVELS.length);
+      // Infinite campaign: unlock grows without an upper bound.
+      this.save.data.unlocked = Math.max(this.save.data.unlocked, this.levelIndex + 2);
       best = this.save.data.best[def.id];
+      // Pre-generate the next campaign level so "Next Level" is instant.
+      if (this.levelIndex + 1 >= LEVELS.length) {
+        setTimeout(() => this.genCampaignLevel(this.levelIndex + 1), 30);
+      }
     }
     if (this.tutorial.active) { this.save.data.tutorialDone = true; this.tutorial.active = false; }
     this.save.save();
@@ -2469,9 +2542,10 @@ class Game {
     }
 
     setTimeout(() => {
+      if (this.state !== 'completed') return;   // navigated away before the panel showed
       this.ui.showComplete({
         stars, moves: this.moves, best, earned,
-        isLast: !this.endless && this.levelIndex === LEVELS.length - 1,
+        isLast: false,                 // the campaign never ends
         endless: this.endless,
       });
     }, 480);
@@ -2569,7 +2643,7 @@ class Game {
 
   showMenu() {
     this.setState('paused');
-    this.ui.showMenu(this.save, LEVELS, i => {
+    this.ui.showMenu(this.save, LEVELS.length, i => {
       this.audio.click();
       this.loadLevel(i);
     }, this.save.data.sound, () => { this.audio.click(); this.startEndless(); },
@@ -2633,12 +2707,12 @@ class Game {
     }, () => this.refreshShop());
   }
 
-  /** Simulated rewarded ad: play a fake ad, then grant the reward. */
+  /** Simulated rewarded ad: play a fake ad, then grant the reward (coins, or
+      pure "help" when reward is 0). */
   watchAd(reward, reason, afterCb) {
     this.ui.playAd(reward, reason, () => {
-      this.grantCoins(reward);
+      if (reward > 0) { this.grantCoins(reward); this.ui.toast('+' + reward + ' coins!', 1300); }
       this.audio.complete();
-      this.ui.toast('+' + reward + ' coins!', 1300);
       if (afterCb) afterCb();
     });
   }
@@ -2686,8 +2760,7 @@ class Game {
 
     el.btnNext.addEventListener('click', click(() => {
       if (this.endless) this.nextEndless();
-      else if (this.levelIndex < LEVELS.length - 1) this.loadLevel(this.levelIndex + 1);
-      else this.showMenu();
+      else this.loadLevel(this.levelIndex + 1);   // campaign is infinite
     }));
     el.btnReplay.addEventListener('click', click(() => {
       if (this.endless) this.loadDef(this.genDef); else this.loadLevel(this.levelIndex);
