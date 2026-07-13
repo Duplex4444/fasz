@@ -50,8 +50,45 @@ const SKINS = [
   { id: 'candy',    name: 'Candy',    cost: 240, body: ['#ff9ec4', '#e46fae'], stripe: '#ffffff', accent: '#fff2a8', cross: '#e8443a' },
   { id: 'shadow',   name: 'Shadow',   cost: 320, body: ['#3a4150', '#1c212c'], stripe: '#ff6a3d', accent: '#ff6a3d', cross: '#ff6a3d' },
   { id: 'gold',     name: 'Golden',   cost: 600, body: ['#ffe38a', '#e0a419'], stripe: '#7a4a12', accent: '#fff6c8', cross: '#a5670c' },
+  // Emergency-fleet variants. `decal` swaps the roof marking: 'ladder' turns
+  // the hero into a fire appliance, 'star' into a police unit, and so on.
+  { id: 'fire',     name: 'Fire Truck',  cost: 400, body: ['#ff6a5a', '#c02a1c'], stripe: '#ffd75e', accent: '#fff2a8', cross: '#f2f6fa', decal: 'ladder' },
+  { id: 'firechief', name: 'Fire Chief', cost: 500, body: ['#d92f21', '#7e150c'], stripe: '#ffffff', accent: '#ffd75e', cross: '#ffd75e', decal: 'ladder' },
+  { id: 'police',   name: 'Police',      cost: 450, body: ['#f4f7fa', '#c9d2dc'], stripe: '#1b2a44', accent: '#2f66d0', cross: '#1b2a44', decal: 'star' },
+  { id: 'interceptor', name: 'Interceptor', cost: 550, body: ['#2c3a55', '#141d30'], stripe: '#ffffff', accent: '#4a92ff', cross: '#dfe8ff', decal: 'star' },
+  { id: 'sheriff',  name: 'Sheriff',     cost: 480, body: ['#8a6b43', '#57401f'], stripe: '#f2e2b8', accent: '#ffd75e', cross: '#f2e2b8', decal: 'star' },
+  { id: 'taxi',     name: 'Taxi',        cost: 350, body: ['#ffd23f', '#e0a419'], stripe: '#20242c', accent: '#ffffff', cross: '#20242c', decal: 'checker' },
+  { id: 'icecream', name: 'Ice Cream',   cost: 380, body: ['#fdf6ff', '#f4c3e4'], stripe: '#8ed3f2', accent: '#ff9ec4', cross: '#ff6a99', decal: 'scoop' },
+  { id: 'neon',     name: 'Neon Racer',  cost: 700, body: ['#3b1f66', '#1c0f38'], stripe: '#27f0c8', accent: '#ff3df0', cross: '#27f0c8', decal: 'bolt' },
 ];
 const skinById = id => SKINS.find(s => s.id === id) || SKINS[0];
+
+/* Street themes for the world rendering. The scenery palette rotates
+   automatically every few levels ("auto"), or the player can buy a theme in
+   the shop and pin it. Purely cosmetic — boards are identical in any theme. */
+const THEMES = [
+  { id: 'day',    name: 'Sunny Day', cost: 0,
+    lawn: ['#95d968', '#7cc453', '#67b243'], blades: ['rgba(44,108,38,0.35)', 'rgba(212,246,182,0.42)'],
+    asphalt: ['#585d66', '#4b5059'], pave: ['#dde3ea', '#c5ccd5'],
+    sun: '255,250,225', sunA: 0.10, tint: null },
+  { id: 'sunset', name: 'Sunset', cost: 250,
+    lawn: ['#b3c95d', '#93a948', '#75893a'], blades: ['rgba(94,98,32,0.35)', 'rgba(246,226,172,0.42)'],
+    asphalt: ['#645a67', '#524a58'], pave: ['#e8dcd6', '#cebdb8'],
+    sun: '255,178,110', sunA: 0.22, tint: 'rgba(255,116,60,0.09)' },
+  { id: 'night',  name: 'Night', cost: 300,
+    lawn: ['#4e7d54', '#3c6343', '#2f5136'], blades: ['rgba(18,44,26,0.4)', 'rgba(150,205,170,0.35)'],
+    asphalt: ['#414751', '#343a44'], pave: ['#a7b1c0', '#8791a2'],
+    sun: '150,185,255', sunA: 0.14, tint: 'rgba(18,34,80,0.16)' },
+  { id: 'autumn', name: 'Autumn', cost: 250,
+    lawn: ['#dcb75f', '#c39c49', '#a78438'], blades: ['rgba(122,88,30,0.4)', 'rgba(255,232,170,0.45)'],
+    asphalt: ['#5d5852', '#4c4742'], pave: ['#e6dfd2', '#ccc4b2'],
+    sun: '255,214,150', sunA: 0.16, tint: 'rgba(196,116,30,0.07)' },
+  { id: 'snow',   name: 'Snow', cost: 350,
+    lawn: ['#f0f5f9', '#dde8ef', '#c9dae5'], blades: ['rgba(122,152,178,0.4)', 'rgba(255,255,255,0.6)'],
+    asphalt: ['#59616c', '#4a525c'], pave: ['#f3f6f9', '#dde4ea'],
+    sun: '212,236,255', sunA: 0.16, tint: 'rgba(158,198,255,0.07)' },
+];
+const themeById = id => THEMES.find(t => t.id === id) || THEMES[0];
 
 /* ============================== UTILITIES ================================= */
 
@@ -694,6 +731,8 @@ class SaveManager {
       endlessBest: 0,              // highest Endless round reached
       ownedSkins: ['classic'],    // skin ids the player owns
       skin: 'classic',            // equipped ambulance skin
+      ownedThemes: ['day'],       // street-theme ids the player owns
+      theme: 'auto',              // 'auto' rotates as you play, or a theme id
       adsRemoved: false,          // "remove ads" purchase (demo)
     };
     this.load();
@@ -707,6 +746,9 @@ class SaveManager {
     if (!Array.isArray(this.data.ownedSkins)) this.data.ownedSkins = ['classic'];
     if (!this.data.ownedSkins.includes('classic')) this.data.ownedSkins.unshift('classic');
     if (!this.data.ownedSkins.includes(this.data.skin)) this.data.skin = 'classic';
+    if (!Array.isArray(this.data.ownedThemes)) this.data.ownedThemes = ['day'];
+    if (!this.data.ownedThemes.includes('day')) this.data.ownedThemes.unshift('day');
+    if (this.data.theme !== 'auto' && !this.data.ownedThemes.includes(this.data.theme)) this.data.theme = 'auto';
   }
   save() {
     try { localStorage.setItem(this.key, JSON.stringify(this.data)); } catch (e) { /* ignore */ }
@@ -864,6 +906,7 @@ class UIManager {
       btnMenuTutorial: $('btnMenuTutorial'), btnEndless: $('btnEndless'), btnShop: $('btnShop'),
       confirmText: $('confirmText'), btnConfirmYes: $('btnConfirmYes'), btnConfirmNo: $('btnConfirmNo'),
       panelShop: $('panelShop'), shopCoins: $('shopCoins'), skinGrid: $('skinGrid'),
+      themeGrid: $('themeGrid'),
       btnWatchAd: $('btnWatchAd'), shopPacks: $('shopPacks'), btnShopClose: $('btnShopClose'),
       panelAd: $('panelAd'), adReason: $('adReason'), adReward: $('adReward'),
       adCount: $('adCount'), adSkip: $('adSkip'), adClaim: $('adClaim'),
@@ -968,8 +1011,8 @@ class UIManager {
     this.showPanel(this.el.panelConfirm);
   }
 
-  /* ---- shop: ambulance skins + coin packs + rewarded ad ---- */
-  showShop(save, skins, cb) {
+  /* ---- shop: ambulance skins + street themes + coin packs + rewarded ad ---- */
+  showShop(save, skins, themes, cb) {
     this.el.shopCoins.textContent = save.data.coins;
     const grid = this.el.skinGrid;
     grid.innerHTML = '';
@@ -987,6 +1030,27 @@ class UIManager {
       const btn = cell.querySelector('.skin-btn');
       if (!equipped) btn.addEventListener('click', () => owned ? cb.onEquip(skin.id) : cb.onBuy(skin.id));
       grid.appendChild(cell);
+    }
+    // Street themes: AUTO (free, rotates) + purchasable pinned styles.
+    const tGrid = this.el.themeGrid;
+    tGrid.innerHTML = '';
+    const autoCard = { id: 'auto', name: 'Auto', cost: 0 };
+    for (const th of [autoCard, ...themes]) {
+      const owned = th.id === 'auto' || save.data.ownedThemes.includes(th.id);
+      const equipped = save.data.theme === th.id;
+      const sw = th.id === 'auto'
+        ? 'linear-gradient(135deg,#95d968 0 25%,#ffb26e 25% 50%,#4e7d54 50% 75%,#f0f5f9 75% 100%)'
+        : `linear-gradient(180deg,${th.lawn[0]} 0 34%,${th.asphalt[0]} 34% 67%,${th.pave[0]} 67% 100%)`;
+      const cell = document.createElement('div');
+      cell.className = 'skin-cell' + (equipped ? ' equipped' : '');
+      cell.innerHTML =
+        `<div class="theme-swatch" style="background:${sw}"></div>
+         <div class="skin-name">${th.name}</div>
+         <button class="skin-btn ${equipped ? 'is-equipped' : owned ? 'is-owned' : 'is-buy'}">${
+           equipped ? 'EQUIPPED' : owned ? 'EQUIP' : '🪙 ' + th.cost}</button>`;
+      const btn = cell.querySelector('.skin-btn');
+      if (!equipped) btn.addEventListener('click', () => owned ? cb.onEquipTheme(th.id) : cb.onBuyTheme(th.id));
+      tGrid.appendChild(cell);
     }
     this.el.btnWatchAd.onclick = cb.onWatchAd;
     this.el.shopPacks.querySelectorAll('[data-coins]').forEach(b => {
@@ -1168,11 +1232,14 @@ class Renderer {
     this.rrOn(c, bx, by, bw, bh, brad); c.clip();
     this.stageRect = { bx, by, bw, bh, brad };
 
+    // Street theme: palette rotates every few levels (or the player pins one).
+    const theme = g.currentTheme();
+
     // Grass: layered lawn — gradient base, mow stripes, organic patches, blades.
     const lawn = c.createLinearGradient(0, 0, 0, h);
-    lawn.addColorStop(0, '#95d968');
-    lawn.addColorStop(0.55, '#7cc453');
-    lawn.addColorStop(1, '#67b243');
+    lawn.addColorStop(0, theme.lawn[0]);
+    lawn.addColorStop(0.55, theme.lawn[1]);
+    lawn.addColorStop(1, theme.lawn[2]);
     c.fillStyle = lawn;
     c.fillRect(0, 0, w, h);
     // Mowed-lawn stripes.
@@ -1192,7 +1259,7 @@ class Renderer {
     for (let i = 0; i < 320; i++) {
       const gx = rand() * w, gy = rand() * h;
       if (gx > ox + cs * 0.9 && gx < ox + (COLS - 1) * cs + cs * 0.1) continue;
-      c.strokeStyle = rand() < 0.5 ? 'rgba(44,108,38,0.35)' : 'rgba(212,246,182,0.42)';
+      c.strokeStyle = rand() < 0.5 ? theme.blades[0] : theme.blades[1];
       c.beginPath();
       c.moveTo(gx, gy);
       c.lineTo(gx + (rand() - 0.5) * 3, gy - 2 - rand() * 3);
@@ -1205,8 +1272,8 @@ class Renderer {
         if (b.type[r][cc] !== TILE.PAVE) continue;
         const x = ox + cc * cs, y = oy + r * cs;
         const pv = c.createLinearGradient(x, y, x, y + cs);
-        pv.addColorStop(0, '#dde3ea');
-        pv.addColorStop(1, '#c5ccd5');
+        pv.addColorStop(0, theme.pave[0]);
+        pv.addColorStop(1, theme.pave[1]);
         c.fillStyle = pv;
         c.fillRect(x, y, cs, cs);
         c.strokeStyle = 'rgba(90,100,115,0.2)';
@@ -1230,8 +1297,8 @@ class Renderer {
         roadCells.push([r, cc]);
         const x = ox + cc * cs, y = oy + r * cs;
         const asp = c.createLinearGradient(x, y, x, y + cs);
-        asp.addColorStop(0, '#585d66');
-        asp.addColorStop(1, '#4b5059');
+        asp.addColorStop(0, theme.asphalt[0]);
+        asp.addColorStop(1, theme.asphalt[1]);
         c.fillStyle = asp;
         c.fillRect(x, y, cs, cs);
         for (let i = 0; i < 10; i++) {
@@ -1475,14 +1542,16 @@ class Renderer {
       else if (d.kind === 'flower') this.paintFlower(c, x, y, s, d.seed);
     }
 
-    // Ambient light: warm sun from the top + gentle occlusion at the edges.
+    // Ambient light: themed sun/sky glow from the top + edge occlusion,
+    // then a whole-scene colour grade (sunset warmth, night blue, ...).
     const sun = c.createRadialGradient(ox + COLS * cs * 0.5, oy - cs, cs,
                                        ox + COLS * cs * 0.5, oy - cs, ROWS * cs * 1.05);
-    sun.addColorStop(0, 'rgba(255,250,225,0.10)');
-    sun.addColorStop(0.4, 'rgba(255,250,225,0.035)');
-    sun.addColorStop(1, 'rgba(255,250,225,0)');
+    sun.addColorStop(0, `rgba(${theme.sun},${theme.sunA})`);
+    sun.addColorStop(0.4, `rgba(${theme.sun},${theme.sunA * 0.35})`);
+    sun.addColorStop(1, `rgba(${theme.sun},0)`);
     c.fillStyle = sun;
     c.fillRect(0, 0, w, h);
+    if (theme.tint) { c.fillStyle = theme.tint; c.fillRect(0, 0, w, h); }
     for (let i = 0; i < 3; i++) {
       c.strokeStyle = `rgba(10,18,30,${0.05 - i * 0.013})`;
       c.lineWidth = cs * (0.18 + i * 0.16);
@@ -2241,10 +2310,64 @@ class Renderer {
     this.rr(-L * 0.44, -W * 0.36, L * 0.58, W * 0.72, cs * 0.12); ctx.fill();
     ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = Math.max(1, cs * 0.03);
     this.rr(-L * 0.44, -W * 0.36, L * 0.58, W * 0.72, cs * 0.12); ctx.stroke();
+    // Roof decal — this is what turns the hero into a fire truck, police
+    // unit, taxi, ... per skin. Default is the medical cross.
     ctx.fillStyle = skin.cross;
     const cw = W * 0.36, ct2 = W * 0.12, ccx = -L * 0.15;
-    this.rr(ccx - cw / 2, -ct2 / 2, cw, ct2, ct2 * 0.3); ctx.fill();
-    this.rr(ccx - ct2 / 2, -cw / 2, ct2, cw, ct2 * 0.3); ctx.fill();
+    const decal = skin.decal || 'cross';
+    if (decal === 'cross') {
+      this.rr(ccx - cw / 2, -ct2 / 2, cw, ct2, ct2 * 0.3); ctx.fill();
+      this.rr(ccx - ct2 / 2, -cw / 2, ct2, cw, ct2 * 0.3); ctx.fill();
+    } else if (decal === 'ladder') {
+      // Roof ladder along the body: two rails + rungs.
+      const x0 = -L * 0.4, x1 = L * 0.08, ry = W * 0.15, th = W * 0.05;
+      this.rr(x0, -ry - th / 2, x1 - x0, th, th / 2); ctx.fill();
+      this.rr(x0, ry - th / 2, x1 - x0, th, th / 2); ctx.fill();
+      for (let i = 0; i <= 5; i++) {
+        const x = x0 + (i * (x1 - x0)) / 5;
+        this.rr(x - th / 2, -ry, th, ry * 2, th / 2); ctx.fill();
+      }
+    } else if (decal === 'star') {
+      // Five-point sheriff/police star.
+      const R = W * 0.21, r2 = R * 0.42;
+      ctx.beginPath();
+      for (let i = 0; i < 10; i++) {
+        const rr = i % 2 === 0 ? R : r2, a = -Math.PI / 2 + (i * Math.PI) / 5;
+        const px = ccx + Math.cos(a) * rr, py = Math.sin(a) * rr;
+        i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      }
+      ctx.closePath(); ctx.fill();
+    } else if (decal === 'checker') {
+      // Taxi checkerboard band across the roof.
+      const sq = W * 0.11, x0 = -L * 0.4;
+      for (let i = 0; i < 8; i++) {
+        for (let j = 0; j < 2; j++) {
+          if ((i + j) % 2 === 0) ctx.fillRect(x0 + i * sq, -sq + j * sq, sq, sq);
+        }
+      }
+    } else if (decal === 'scoop') {
+      // Ice-cream cone with a double scoop + cherry.
+      ctx.fillStyle = '#e8b96a';
+      ctx.beginPath();
+      ctx.moveTo(ccx - W * 0.26, 0); ctx.lineTo(ccx + W * 0.04, -W * 0.13);
+      ctx.lineTo(ccx + W * 0.04, W * 0.13); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = skin.cross;
+      ctx.beginPath(); ctx.arc(ccx + W * 0.08, 0, W * 0.14, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff6fb';
+      ctx.beginPath(); ctx.arc(ccx + W * 0.2, 0, W * 0.11, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#e8443a';
+      ctx.beginPath(); ctx.arc(ccx + W * 0.28, 0, W * 0.045, 0, Math.PI * 2); ctx.fill();
+    } else if (decal === 'bolt') {
+      // Lightning bolt.
+      ctx.beginPath();
+      ctx.moveTo(ccx + W * 0.24, -W * 0.2);
+      ctx.lineTo(ccx - W * 0.02, -W * 0.02);
+      ctx.lineTo(ccx + W * 0.1, W * 0.02);
+      ctx.lineTo(ccx - W * 0.24, W * 0.2);
+      ctx.lineTo(ccx - W * 0.02, 0.0);
+      ctx.lineTo(ccx - W * 0.12, -W * 0.04);
+      ctx.closePath(); ctx.fill();
+    }
 
     // Rear twin-door seam behind the roof module, and a moulded front bumper.
     ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.lineWidth = Math.max(1, cs * 0.03);
@@ -3095,6 +3218,17 @@ class Game {
   /* ------------------------------ economy / shop ------------------------- */
   currentSkin() { return skinById(this.save.data.skin); }
 
+  /* Street theme in effect: a pinned purchase, or auto-rotation that changes
+     the scenery every 3 campaign levels / every 2 endless rounds. */
+  currentTheme() {
+    const pick = this.save.data.theme;
+    if (pick && pick !== 'auto') return themeById(pick);
+    const n = this.endless
+      ? Math.floor(Math.max(0, (this.endlessRound || 1) - 1) / 2)
+      : Math.floor(this.levelIndex / 3);
+    return THEMES[n % THEMES.length];
+  }
+
   grantCoins(n) {
     this.save.data.coins += n;
     this.save.save();
@@ -3106,9 +3240,11 @@ class Game {
     this.refreshShop();
   }
   refreshShop() {
-    this.ui.showShop(this.save, SKINS, {
+    this.ui.showShop(this.save, SKINS, THEMES, {
       onBuy: id => this.buySkin(id),
       onEquip: id => this.equipSkin(id),
+      onBuyTheme: id => this.buyTheme(id),
+      onEquipTheme: id => this.equipTheme(id),
       onWatchAd: () => this.watchAd(30, 'Free coins', () => this.refreshShop()),
       onPack: (coins, label) => this.buyCoins(coins, label),
       onClose: () => { this.audio.click(); this.showMenu(); },
@@ -3135,6 +3271,32 @@ class Game {
     if (!this.save.data.ownedSkins.includes(id)) return;
     this.save.data.skin = id;
     this.save.save();
+    this.audio.select();
+    this.refreshShop();
+  }
+
+  buyTheme(id) {
+    const th = themeById(id);
+    if (this.save.data.ownedThemes.includes(id)) { this.equipTheme(id); return; }
+    if (this.save.data.coins < th.cost) {
+      this.ui.toast('Not enough coins — earn more!', 1300);
+      this.audio.invalid();
+      return;
+    }
+    this.save.data.coins -= th.cost;
+    this.save.data.ownedThemes.push(id);
+    this.save.data.theme = id;
+    this.save.save();
+    this.renderer.groundDirty = true;   // repaint the world in the new style
+    this.audio.park();
+    this.ui.toast(th.name + ' street unlocked!', 1300);
+    this.refreshShop();
+  }
+  equipTheme(id) {
+    if (id !== 'auto' && !this.save.data.ownedThemes.includes(id)) return;
+    this.save.data.theme = id;
+    this.save.save();
+    this.renderer.groundDirty = true;
     this.audio.select();
     this.refreshShop();
   }

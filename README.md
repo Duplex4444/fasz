@@ -98,14 +98,27 @@ layered dependencies (not one repeated trick), and progressive relaxation keeps
 the success rate at ~100% without ever shipping an unsolvable board. Same seed →
 same map, so any puzzle is reproducible.
 
-## Garage, skins & coins (demo economy)
+## Garage, skins, street themes & coins (demo economy)
 
-The **🛒 Garage & Shop** on the menu lets you spend coins on **ambulance skins**
-(Classic, Midnight, Ranger, Candy, Shadow, Golden) — each is a procedurally
-drawn palette, no assets. You earn coins by clearing levels, by **watching a
-(simulated) rewarded ad** for free coins, or via **coin packs**. A rewarded-ad
-offer also pops up periodically (every 5 minutes, at a calm moment) for bonus
-coins. Owned skins, the equipped skin, and coins persist in `localStorage`.
+The **🛒 Garage & Shop** on the menu lets you spend coins on **14 hero-vehicle
+skins** — the classics (Classic, Midnight, Ranger, Candy, Shadow, Golden) plus
+a whole emergency fleet with real roof decals: **Fire Truck** and **Fire
+Chief** (roof ladder), **Police**, **Interceptor** and **Sheriff** (five-point
+star), **Taxi** (checker band), **Ice Cream** (cone + scoops) and **Neon
+Racer** (lightning bolt). Each is a procedurally drawn palette + decal, no
+assets.
+
+Below the skins are **street themes**: the world's scenery palette. On
+**AUTO** (free, default) the neighbourhood changes as you play — Sunny Day →
+Sunset → Night → Autumn → Snow, rotating every 3 campaign levels and every 2
+endless rounds. Or buy a theme (Sunset, Night, Autumn, Snow) and **pin it** so
+every street is painted that way. Themes are purely cosmetic — the boards are
+identical in any palette.
+
+You earn coins by clearing levels, by **watching a (simulated) rewarded ad**
+for free coins, or via **coin packs**. A rewarded-ad offer also pops up
+periodically (every 5 minutes, at a calm moment) for bonus coins. Owned skins
+and themes, the equipped ones, and coins persist in `localStorage`.
 
 > **Note:** this is an offline prototype — there is **no ad network and no
 > payment processor**. The ad player and coin packs are clearly labelled
