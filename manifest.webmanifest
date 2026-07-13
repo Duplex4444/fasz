@@ -1,0 +1,23 @@
+{
+  "name": "Clear the Way",
+  "short_name": "Clear the Way",
+  "description": "Park the traffic. Save a life. A chain-reaction traffic puzzle: clear the emergency lane so the ambulance can race to the exit.",
+  "id": "./",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#1c2839",
+  "theme_color": "#233043",
+  "lang": "en",
+  "categories": ["games", "puzzle"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "screenshots": [
+    { "src": "screenshots/gameplay-1.png", "sizes": "780x1688", "type": "image/png", "form_factor": "narrow", "label": "Choose which car to move — clear the emergency lane" },
+    { "src": "screenshots/gameplay-2.png", "sizes": "780x1688", "type": "image/png", "form_factor": "narrow", "label": "Dense late-game gridlock with trucks and vans" }
+  ]
+}

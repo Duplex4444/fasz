@@ -16,6 +16,7 @@
 
 /* ============================== 1. CONSTANTS ============================== */
 
+const GAME_VERSION = '1.0.0'; // shown in the menu; keep sw.js CACHE in sync
 const DEBUG = false;          // draw grid, coordinates, footprints, route, ids
 const ROWS  = 14;
 const COLS  = 7;
@@ -2506,9 +2507,18 @@ class Game {
 
     this.bindUI();
     window.addEventListener('resize', () => this.onResize());
+    // Mobile lifecycle: auto-pause and silence audio when backgrounded (a
+    // store requirement — games must not play sound from a background tab).
     document.addEventListener('visibilitychange', () => {
-      if (document.hidden && (this.state === 'waiting' || this.state === 'selected')) this.pause();
+      if (document.hidden) {
+        if (this.state === 'waiting' || this.state === 'selected') this.pause();
+        if (this.audio.ctx && this.audio.ctx.state === 'running') this.audio.ctx.suspend();
+      } else if (this.audio.ctx && this.audio.ctx.state === 'suspended') {
+        this.audio.ctx.resume();
+      }
     });
+    // No long-press context menu / text selection over the board.
+    this.canvas.addEventListener('contextmenu', e => e.preventDefault());
 
     // Developer validation of every level (console only).
     setTimeout(() => {
@@ -2541,6 +2551,13 @@ class Game {
   vehicleById(id) { return this.vehicles.find(v => v.id === id); }
   spaceById(id) { return this.spaces.find(s => s.id === id); }
   inputAllowed() { return this.state === 'waiting' || this.state === 'selected'; }
+
+  /* Tiny vibration cues on devices that support it; follows the sound
+     toggle so the player has one switch for all feedback. */
+  haptic(pattern) {
+    if (!this.save.data.sound || !navigator.vibrate) return;
+    try { navigator.vibrate(pattern); } catch (e) { /* unsupported */ }
+  }
 
   /** Civilian vehicles + the ambulance, as plain obstacle records. */
   allObstacles() {
@@ -2741,6 +2758,7 @@ class Game {
       veh.shakeT = 1;
       this.blockedFx = { vehicleId, until: this.now + 950 };
       this.audio.invalid();
+      this.haptic(24);
       return;
     }
     // Tutorial is informational now — several cars are movable, the player
@@ -2820,6 +2838,7 @@ class Game {
       this.ui.updateHUD(this.hudLabel(), this.moves, this.levelDef().par, this.save.data.coins);
       this.ui.updateUndo(true);
       this.audio.park();
+      this.haptic(12);
       this.particles.sparkle(veh.px.x, veh.px.y, 10);
       this.particles.dust(veh.px.x, veh.px.y, 12);
 
@@ -2866,6 +2885,7 @@ class Game {
     const solvable = solveLevel(this.board, this.allObstacles(), this.spaces, depth);
     if (solvable) return;
     this.audio.invalid();
+    this.haptic([30, 40, 30]);
     this.setState('paused');
     this.ui.showStuck({
       canUndo: this.history.length > 0,
@@ -2921,6 +2941,7 @@ class Game {
 
   finishLevel() {
     this.setState('completed');
+    this.haptic([26, 60, 26]);
     const def = this.levelDef();
     const par = def.par;
     const stars = this.moves <= par ? 3 : this.moves <= par + 2 ? 2 : 1;
@@ -3245,6 +3266,17 @@ class Game {
 /* -------------------------------- BOOTSTRAP ------------------------------ */
 window.addEventListener('DOMContentLoaded', () => {
   window.game = new Game();
+
+  // Publish chrome: version stamp + installable-PWA service worker. The SW
+  // only registers when the page is served over http(s) with its manifest
+  // present (i.e. the real deployment — not file:// or an inlined preview).
+  const ver = document.getElementById('versionLine');
+  if (ver) ver.textContent = 'v' + GAME_VERSION;
+  if ('serviceWorker' in navigator &&
+      /^https?:$/.test(location.protocol) &&
+      document.querySelector('link[rel="manifest"]')) {
+    navigator.serviceWorker.register('sw.js').catch(() => { /* offline still works next visit */ });
+  }
 });
 
 } /* end IS_BROWSER */

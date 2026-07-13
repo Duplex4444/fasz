@@ -4,7 +4,20 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"/>
 <meta name="theme-color" content="#233043"/>
+<meta name="description" content="Park the traffic. Save a life. A chain-reaction traffic puzzle: clear the emergency lane so the ambulance can race to the exit."/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="Clear the Way"/>
+<meta name="format-detection" content="telephone=no"/>
+<meta property="og:title" content="Clear the Way"/>
+<meta property="og:description" content="Park the traffic. Save a life. A chain-reaction traffic puzzle."/>
+<meta property="og:type" content="website"/>
+<meta property="og:image" content="icons/icon-512.png"/>
 <title>Clear the Way</title>
+<link rel="manifest" href="manifest.webmanifest"/>
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png"/>
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png"/>
 <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
@@ -75,6 +88,7 @@
         <button id="btnMenuSound" class="panel-btn small">SOUND: ON</button>
         <button id="btnMenuTutorial" class="panel-btn small">TUTORIAL</button>
       </div>
+      <p class="version-line" id="versionLine">v1.0.0</p>
     </div>
 
     <div id="panelConfirm" class="panel hidden">
@@ -137,6 +151,13 @@
       <button id="btnAdOfferSkip" class="panel-btn">NO THANKS</button>
     </div>
 
+  </div>
+
+  <!-- Portrait-only guard: shown on small screens held in landscape -->
+  <div id="rotateOverlay">
+    <div class="rotate-phone">📱</div>
+    <h2>PLEASE ROTATE</h2>
+    <p>Clear the Way is played in portrait.</p>
   </div>
 </div>
 <script src="game.js"></script>

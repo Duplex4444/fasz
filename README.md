@@ -142,6 +142,45 @@ coins. Owned skins, the equipped skin, and coins persist in `localStorage`.
 - All graphics drawn procedurally on Canvas; all sound generated with Web Audio
 - Pointer Events: touch and mouse both work; page scroll/zoom suppressed
 
+## Publishing — the game ships as an installable PWA
+
+The repo contains everything a store submission needs:
+
+- **`manifest.webmanifest`** — name, portrait lock, standalone display,
+  theme/background colours, categories, store-style screenshots, and icons
+  (192/512 + a maskable 512 for Android adaptive launchers).
+- **`icons/`** — procedurally generated app icons, including
+  `apple-touch-icon.png` for iOS home screens.
+- **`sw.js`** — a service worker that precaches the whole app shell, so the
+  game **installs and runs fully offline**. It registers itself only when
+  served over http(s); opening `index.html` from disk still works. Bump the
+  `CACHE` name (and `GAME_VERSION` in `game.js`) on each release.
+- **`screenshots/`** — portrait gameplay captures referenced by the manifest
+  and reusable for store listings.
+- **`PRIVACY.md`** — privacy policy (stores require a hosted policy URL; this
+  game collects nothing, everything is in `localStorage`).
+- **Mobile lifecycle built in** — auto-pause + audio suspend when the app is
+  backgrounded, a rotate-to-portrait guard on small landscape screens,
+  vibration feedback (follows the sound toggle), iOS safe-area handling, no
+  pinch-zoom/scroll/long-press artifacts, and a version stamp in the menu.
+
+### Store checklist
+
+1. **Host it** on any static HTTPS host — it's instantly playable and
+   installable (Add to Home Screen) on Android and iOS.
+2. **Google Play**: wrap the hosted URL as a Trusted Web Activity with
+   [Bubblewrap](https://github.com/GoogleChromeLabs/bubblewrap)
+   (`bubblewrap init --manifest https://your.host/manifest.webmanifest`), or
+   use Capacitor if you prefer a WebView shell.
+3. **App Store**: wrap with [Capacitor](https://capacitorjs.com)
+   (`npx cap add ios`, point the webDir at this folder).
+4. **Before charging real money**: replace the demo economy — wire
+   `Game.watchAd` to a rewarded-ad SDK and `Game.buyCoins` to the platform's
+   in-app purchase API. Until then the demo labels must stay.
+5. Fill in the listing with `icons/icon-512.png`, the `screenshots/` images,
+   `PRIVACY.md` hosted at a public URL, and a content rating (no violence,
+   no data collection — typically rated for all ages).
+
 ## Files
 
 - `index.html` — page structure: HUD, canvas stage, toolbar, overlay panels
@@ -150,6 +189,8 @@ coins. Owned skins, the equipped skin, and coins persist in `localStorage`.
   Node-compatible for testing)
 - `test.js`    — automated validation: run `node test.js` to verify geometry,
   pathfinding rules, and solvability of every level
+- `manifest.webmanifest`, `sw.js`, `icons/`, `screenshots/`, `PRIVACY.md` —
+  publishing shell (see above)
 
 ## Level validation
 
