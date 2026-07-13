@@ -126,14 +126,19 @@ coins. Owned skins, the equipped skin, and coins persist in `localStorage`.
 - Tutorial on first play, pause menu, level select, sound toggle
 - Movable-car glow, blocked-car shake + badge, unlock sparkles, confetti
 - Polished toy-3D presentation: vehicles are extruded (a darker base under a
-  glossy top face) for real depth, with per-car variety, wheels, windshields,
-  and head/tail lights; the board is a framed "stage" on a premium dark
-  backdrop; the ambulance is a hero object with a strobing red/blue light bar
-  and coloured light-spill on the road; parking dust, sparkles, confetti, and a
-  soft vignette round out the feel. Static scenery (grass, asphalt, curbs,
-  painted bays, houses, trees, hydrants, fences, mailboxes, flowers) is
-  pre-rendered to an offscreen cache, so only vehicles + effects redraw each
-  frame (≈60 fps on the densest level).
+  glossy top face) with chunky tires + hubs, and every car has a real body
+  style — sedan, hatchback, compact, van, pickup, or box truck — with a full
+  greenhouse (windshield, side windows, rear glass around a floating roof),
+  bumpers, mirrors, creases, and per-car extras like sunroofs and racing
+  stripes; the board is a framed "stage" on a premium dark backdrop; the
+  ambulance is a hero object with a strobing red/blue light bar and coloured
+  light-spill on the road; parking dust, sparkles, confetti, and a soft
+  vignette round out the feel. Static scenery (mowed grass with blades, grainy
+  asphalt with tyre wear + oil stains, lit curbs, painted worn bays, gabled
+  houses, trees, hydrants, fences, mailboxes, benches, storm drains, flowers)
+  is pre-rendered to an offscreen cache, and each car's painted body is cached
+  as a sprite, so per-frame work is a handful of drawImage calls (≈60 fps on
+  the densest level).
 - All graphics drawn procedurally on Canvas; all sound generated with Web Audio
 - Pointer Events: touch and mouse both work; page scroll/zoom suppressed
 

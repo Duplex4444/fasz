@@ -1051,6 +1051,7 @@ class Renderer {
     this.dpr = 1;
     this.ground = null;       // offscreen cache of all static scenery
     this.groundDirty = true;  // rebuilt lazily on the next frame
+    this.carSprites = new Map(); // offscreen cache of painted car top faces
     this.resize();
   }
 
@@ -1070,6 +1071,7 @@ class Renderer {
       w, h,
     };
     this.groundDirty = true;
+    if (this.carSprites) this.carSprites.clear(); // cs/dpr changed
   }
 
   /* Pixel pose (center + angle) of a vehicle state. */
@@ -1165,120 +1167,228 @@ class Renderer {
     this.rrOn(c, bx, by, bw, bh, brad); c.clip();
     this.stageRect = { bx, by, bw, bh, brad };
 
-    // Grass: warm top-lit gradient + soft checker + mottled patches.
+    // Grass: layered lawn — gradient base, mow stripes, organic patches, blades.
     const lawn = c.createLinearGradient(0, 0, 0, h);
-    lawn.addColorStop(0, '#8ed162');
-    lawn.addColorStop(1, '#6fbc48');
+    lawn.addColorStop(0, '#95d968');
+    lawn.addColorStop(0.55, '#7cc453');
+    lawn.addColorStop(1, '#67b243');
     c.fillStyle = lawn;
     c.fillRect(0, 0, w, h);
-    c.fillStyle = 'rgba(255,255,255,0.055)';
-    for (let r = -2; r < ROWS + 2; r++) {
-      for (let cc = -2; cc < COLS + 2; cc++) {
-        if ((r + cc) % 2 === 0) c.fillRect(ox + cc * cs, oy + r * cs, cs, cs);
-      }
+    // Mowed-lawn stripes.
+    c.fillStyle = 'rgba(255,255,255,0.05)';
+    for (let r = -1; r < ROWS + 1; r++) {
+      if (((r % 2) + 2) % 2 === 1) c.fillRect(0, oy + r * cs, w, cs);
     }
-    for (let i = 0; i < 26; i++) {
-      c.fillStyle = rand() < 0.5 ? 'rgba(255,255,255,0.05)' : 'rgba(30,80,20,0.05)';
+    // Soft organic light/dark patches.
+    for (let i = 0; i < 30; i++) {
+      c.fillStyle = rand() < 0.5 ? 'rgba(255,255,235,0.05)' : 'rgba(24,74,18,0.06)';
       c.beginPath();
-      c.ellipse(rand() * w, rand() * h, cs * (0.6 + rand()), cs * (0.35 + rand() * 0.6), rand() * 3, 0, Math.PI * 2);
+      c.ellipse(rand() * w, rand() * h, cs * (0.5 + rand()), cs * (0.3 + rand() * 0.5), rand() * 3, 0, Math.PI * 2);
       c.fill();
     }
+    // Tiny grass blades + clover dots (cached — zero runtime cost).
+    c.lineWidth = 1;
+    for (let i = 0; i < 320; i++) {
+      const gx = rand() * w, gy = rand() * h;
+      if (gx > ox + cs * 0.9 && gx < ox + (COLS - 1) * cs + cs * 0.1) continue;
+      c.strokeStyle = rand() < 0.5 ? 'rgba(44,108,38,0.35)' : 'rgba(212,246,182,0.42)';
+      c.beginPath();
+      c.moveTo(gx, gy);
+      c.lineTo(gx + (rand() - 0.5) * 3, gy - 2 - rand() * 3);
+      c.stroke();
+    }
 
-    // Sidewalk / apron cells: concrete tiles with seams.
+    // Sidewalk / apron cells: concrete slabs with seams, speckle and wear.
     for (let r = 0; r < ROWS; r++) {
       for (let cc = 0; cc < COLS; cc++) {
         if (b.type[r][cc] !== TILE.PAVE) continue;
         const x = ox + cc * cs, y = oy + r * cs;
         const pv = c.createLinearGradient(x, y, x, y + cs);
-        pv.addColorStop(0, '#d5dbe2');
-        pv.addColorStop(1, '#c3cad3');
+        pv.addColorStop(0, '#dde3ea');
+        pv.addColorStop(1, '#c5ccd5');
         c.fillStyle = pv;
         c.fillRect(x, y, cs, cs);
-        c.strokeStyle = 'rgba(90,100,115,0.16)';
+        c.strokeStyle = 'rgba(90,100,115,0.2)';
         c.lineWidth = 1;
         c.strokeRect(x + 0.5, y + 0.5, cs - 1, cs - 1);
+        c.beginPath(); c.moveTo(x + cs / 2, y); c.lineTo(x + cs / 2, y + cs); c.stroke();
+        for (let i = 0; i < 4; i++) {
+          c.fillStyle = rand() < 0.5 ? 'rgba(255,255,255,0.3)' : 'rgba(70,80,95,0.12)';
+          c.fillRect(x + 2 + rand() * (cs - 5), y + 2 + rand() * (cs - 5), 1.6, 1.6);
+        }
+        c.fillStyle = 'rgba(60,70,85,0.06)';
+        c.fillRect(x, y + cs - cs * 0.16, cs, cs * 0.16);
       }
     }
 
-    // Road: asphalt with subtle speckle texture.
+    // Road: warm layered asphalt with grain.
+    const roadCells = [];
     for (let r = 0; r < ROWS; r++) {
       for (let cc = 0; cc < COLS; cc++) {
         if (b.type[r][cc] !== TILE.ROAD) continue;
+        roadCells.push([r, cc]);
         const x = ox + cc * cs, y = oy + r * cs;
-        c.fillStyle = '#51565f';
+        const asp = c.createLinearGradient(x, y, x, y + cs);
+        asp.addColorStop(0, '#585d66');
+        asp.addColorStop(1, '#4b5059');
+        c.fillStyle = asp;
         c.fillRect(x, y, cs, cs);
-        for (let i = 0; i < 6; i++) {
-          c.fillStyle = rand() < 0.5 ? 'rgba(255,255,255,0.045)' : 'rgba(0,0,0,0.07)';
-          c.fillRect(x + rand() * (cs - 2), y + rand() * (cs - 2), 2, 2);
+        for (let i = 0; i < 10; i++) {
+          c.fillStyle = rand() < 0.5 ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.08)';
+          const gsz = rand() < 0.8 ? 1.4 : 2.2;
+          c.fillRect(x + rand() * (cs - 2), y + rand() * (cs - 2), gsz, gsz);
         }
       }
     }
+    // Tyre-wear tracks along the side lanes (never the emergency lane).
+    for (let cc = 0; cc < COLS; cc++) {
+      let run = null;
+      for (let r = 0; r <= ROWS; r++) {
+        const on = r < ROWS && b.type[r][cc] === TILE.ROAD && !b.routeSet.has(r + ',' + cc);
+        if (on && run === null) run = r;
+        if ((!on || r === ROWS) && run !== null) {
+          c.fillStyle = 'rgba(18,22,30,0.07)';
+          c.fillRect(ox + cc * cs + cs * 0.18, oy + run * cs, cs * 0.15, (r - run) * cs);
+          c.fillRect(ox + cc * cs + cs * 0.67, oy + run * cs, cs * 0.15, (r - run) * cs);
+          run = null;
+        }
+      }
+    }
+    // Oil stains + asphalt repair patches (off the emergency route).
+    let stains = 0;
+    for (let tries = 0; tries < 40 && stains < 3; tries++) {
+      const pick2 = roadCells[(rand() * roadCells.length) | 0];
+      if (!pick2 || b.routeSet.has(pick2[0] + ',' + pick2[1])) continue;
+      const x = ox + (pick2[1] + 0.3 + rand() * 0.4) * cs, y = oy + (pick2[0] + 0.3 + rand() * 0.4) * cs;
+      c.fillStyle = 'rgba(18,20,28,0.16)';
+      c.beginPath(); c.ellipse(x, y, cs * (0.13 + rand() * 0.1), cs * (0.09 + rand() * 0.07), rand() * 3, 0, Math.PI * 2); c.fill();
+      c.fillStyle = 'rgba(18,20,28,0.12)';
+      c.beginPath(); c.ellipse(x + cs * 0.08, y + cs * 0.05, cs * 0.06, cs * 0.045, 0, 0, Math.PI * 2); c.fill();
+      stains++;
+    }
+    let patches = 0;
+    for (let tries = 0; tries < 40 && patches < 2; tries++) {
+      const pick2 = roadCells[(rand() * roadCells.length) | 0];
+      if (!pick2 || b.routeSet.has(pick2[0] + ',' + pick2[1])) continue;
+      const pw = cs * (0.34 + rand() * 0.22), ph = cs * (0.24 + rand() * 0.18);
+      const x = ox + pick2[1] * cs + rand() * (cs - pw), y = oy + pick2[0] * cs + rand() * (cs - ph);
+      c.fillStyle = 'rgba(28,32,40,0.22)';
+      this.rrOn(c, x, y, pw, ph, cs * 0.06); c.fill();
+      c.strokeStyle = 'rgba(0,0,0,0.16)'; c.lineWidth = 1;
+      this.rrOn(c, x, y, pw, ph, cs * 0.06); c.stroke();
+      patches++;
+    }
 
-    // Curbs: light stone with a darker seam toward the road.
-    const curb = Math.max(2.5, cs * 0.1);
-    const seam = Math.max(1, cs * 0.028);
+    // Curbs: stone kerb with a lit face, joint ticks, and road-side shading.
+    const curb = Math.max(3, cs * 0.11);
+    const seam = Math.max(1, cs * 0.03);
+    const kerbJoints = (x, y, horiz2, len2) => {
+      c.strokeStyle = 'rgba(95,105,120,0.35)';
+      c.lineWidth = 1;
+      const step = cs / 2;
+      for (let p = step / 2; p < len2; p += step) {
+        c.beginPath();
+        if (horiz2) { c.moveTo(x + p, y); c.lineTo(x + p, y + curb); }
+        else { c.moveTo(x, y + p); c.lineTo(x + curb, y + p); }
+        c.stroke();
+      }
+    };
     for (let r = 0; r < ROWS; r++) {
       for (let cc = 0; cc < COLS; cc++) {
         if (!b.drivable[r][cc]) continue;
         const x = ox + cc * cs, y = oy + r * cs;
         if (cc === 0 || !b.drivable[r][cc - 1]) {
-          c.fillStyle = '#e9edf1'; c.fillRect(x, y, curb, cs);
-          c.fillStyle = 'rgba(35,45,60,0.28)'; c.fillRect(x + curb, y, seam, cs);
+          c.fillStyle = '#eef2f6'; c.fillRect(x, y, curb, cs);
+          c.fillStyle = '#c8cfd8'; c.fillRect(x + curb * 0.55, y, curb * 0.45, cs);
+          c.fillStyle = 'rgba(30,40,55,0.3)'; c.fillRect(x + curb, y, seam, cs);
+          const ao = c.createLinearGradient(x + curb, y, x + curb + cs * 0.18, y);
+          ao.addColorStop(0, 'rgba(0,0,0,0.12)'); ao.addColorStop(1, 'rgba(0,0,0,0)');
+          c.fillStyle = ao; c.fillRect(x + curb, y, cs * 0.18, cs);
+          kerbJoints(x, y, false, cs);
         }
         if (cc === COLS - 1 || !b.drivable[r][cc + 1]) {
-          c.fillStyle = '#e9edf1'; c.fillRect(x + cs - curb, y, curb, cs);
-          c.fillStyle = 'rgba(35,45,60,0.28)'; c.fillRect(x + cs - curb - seam, y, seam, cs);
+          c.fillStyle = '#eef2f6'; c.fillRect(x + cs - curb, y, curb, cs);
+          c.fillStyle = '#c8cfd8'; c.fillRect(x + cs - curb, y, curb * 0.45, cs);
+          c.fillStyle = 'rgba(30,40,55,0.3)'; c.fillRect(x + cs - curb - seam, y, seam, cs);
+          const ao = c.createLinearGradient(x + cs - curb, y, x + cs - curb - cs * 0.18, y);
+          ao.addColorStop(0, 'rgba(0,0,0,0.12)'); ao.addColorStop(1, 'rgba(0,0,0,0)');
+          c.fillStyle = ao; c.fillRect(x + cs - curb - cs * 0.18, y, cs * 0.18, cs);
+          kerbJoints(x + cs - curb, y, false, cs);
         }
         if (r === 0 || !b.drivable[r - 1][cc]) {
-          c.fillStyle = '#e9edf1'; c.fillRect(x, y, cs, curb);
-          c.fillStyle = 'rgba(35,45,60,0.28)'; c.fillRect(x, y + curb, cs, seam);
+          c.fillStyle = '#eef2f6'; c.fillRect(x, y, cs, curb);
+          c.fillStyle = 'rgba(30,40,55,0.3)'; c.fillRect(x, y + curb, cs, seam);
+          kerbJoints(x, y, true, cs);
         }
         if (r === ROWS - 1 || !b.drivable[r + 1][cc]) {
-          c.fillStyle = '#e9edf1'; c.fillRect(x, y + cs - curb, cs, curb);
-          c.fillStyle = 'rgba(35,45,60,0.28)'; c.fillRect(x, y + cs - curb - seam, cs, seam);
+          c.fillStyle = '#eef2f6'; c.fillRect(x, y + cs - curb, cs, curb);
+          c.fillStyle = 'rgba(30,40,55,0.3)'; c.fillRect(x, y + cs - curb - seam, cs, seam);
+          kerbJoints(x, y + cs - curb, true, cs);
         }
       }
     }
 
-    // Dashed lane separators beside the emergency lane.
-    c.strokeStyle = 'rgba(244,246,248,0.55)';
-    c.lineWidth = Math.max(2, cs * 0.055);
-    c.setLineDash([cs * 0.45, cs * 0.4]);
+    // Hand-painted lane dashes (worn paint, rounded ends, varied alpha).
+    c.lineCap = 'round';
     for (const lx of [3, 4]) {
-      let run = null;
-      for (let r = 0; r <= ROWS; r++) {
-        const on = r < ROWS && b.type[r][lx - 1] === TILE.ROAD && b.type[r][lx] === TILE.ROAD;
-        if (on && run === null) run = r;
-        if ((!on || r === ROWS) && run !== null) {
-          c.beginPath();
-          c.moveTo(ox + lx * cs, oy + run * cs + 3);
-          c.lineTo(ox + lx * cs, oy + r * cs - 3);
-          c.stroke();
-          run = null;
-        }
+      for (let r = 0; r < ROWS; r++) {
+        if (!(b.type[r][lx - 1] === TILE.ROAD && b.type[r][lx] === TILE.ROAD)) continue;
+        const x = ox + lx * cs;
+        c.strokeStyle = `rgba(244,246,248,${0.38 + rand() * 0.3})`;
+        c.lineWidth = Math.max(2, cs * 0.06);
+        c.beginPath();
+        c.moveTo(x, oy + r * cs + cs * 0.14);
+        c.lineTo(x, oy + r * cs + cs * 0.6);
+        c.stroke();
       }
     }
-    c.setLineDash([]);
+    c.lineCap = 'butt';
 
-    // Emergency lane: warm tint + red dashed edge lines.
+    // Emergency lane: a proper "keep clear" corridor.
     for (const p of b.route) {
-      c.fillStyle = 'rgba(255,110,80,0.10)';
-      c.fillRect(ox + p.c * cs, oy + p.r * cs, cs, cs);
+      const x = ox + p.c * cs, y = oy + p.r * cs;
+      const laneG = c.createLinearGradient(x, y, x + cs, y);
+      laneG.addColorStop(0, 'rgba(255,105,75,0.17)');
+      laneG.addColorStop(0.5, 'rgba(255,128,98,0.09)');
+      laneG.addColorStop(1, 'rgba(255,105,75,0.17)');
+      c.fillStyle = laneG;
+      c.fillRect(x, y, cs, cs);
     }
     if (b.route.length) {
       const col = b.route[0].c;
       const rows = b.route.map(p => p.r);
       const r0 = Math.min(...rows), r1 = Math.max(...rows);
-      c.strokeStyle = 'rgba(255,96,70,0.5)';
-      c.lineWidth = Math.max(2, cs * 0.05);
-      c.setLineDash([cs * 0.3, cs * 0.24]);
-      for (const x of [ox + col * cs + cs * 0.07, ox + (col + 1) * cs - cs * 0.07]) {
-        c.beginPath();
-        c.moveTo(x, oy + r0 * cs);
-        c.lineTo(x, oy + (r1 + 1) * cs);
-        c.stroke();
+      // Red / white fire-lane edge dashes.
+      c.lineCap = 'round';
+      c.lineWidth = Math.max(2, cs * 0.055);
+      for (const x of [ox + col * cs + cs * 0.06, ox + (col + 1) * cs - cs * 0.06]) {
+        for (let r = r0; r <= r1; r++) {
+          for (let k = 0; k < 2; k++) {
+            c.strokeStyle = (r * 2 + k) % 2 === 0 ? 'rgba(255,84,62,0.8)' : 'rgba(255,246,242,0.75)';
+            c.beginPath();
+            c.moveTo(x, oy + r * cs + cs * (0.07 + k * 0.5));
+            c.lineTo(x, oy + r * cs + cs * (0.4 + k * 0.5));
+            c.stroke();
+          }
+        }
       }
-      c.setLineDash([]);
+      c.lineCap = 'butt';
+      // Faint painted medical crosses along the corridor.
+      c.fillStyle = 'rgba(255,255,255,0.10)';
+      for (let r = r0 + 2; r <= r1 - 2; r += 4) {
+        const cxm = ox + (col + 0.5) * cs, cym = oy + (r + 0.5) * cs;
+        c.fillRect(cxm - cs * 0.05, cym - cs * 0.17, cs * 0.1, cs * 0.34);
+        c.fillRect(cxm - cs * 0.17, cym - cs * 0.05, cs * 0.34, cs * 0.1);
+      }
+      // Checkered goal strip right at the exit.
+      const gy = oy + r0 * cs;
+      const sq = cs / 4;
+      for (let i = 0; i < 4; i++) {
+        for (let j = 0; j < 2; j++) {
+          c.fillStyle = (i + j) % 2 === 0 ? 'rgba(255,255,255,0.7)' : 'rgba(28,32,42,0.7)';
+          c.fillRect(ox + col * cs + i * sq, gy + j * sq * 0.55, sq, sq * 0.55);
+        }
+      }
     }
 
     // A couple of manhole covers on the outer lanes.
@@ -1300,22 +1410,49 @@ class Renderer {
       holes++;
     }
 
-    // Parking bays: tinted slab, painted white outline, big P.
+    // Parking bays: painted into the ground — pad, worn double outline, big P.
     for (const sp of g.spaces) {
       const cells = spaceCells(sp);
       const minR = Math.min(...cells.map(p => p[0])), maxR = Math.max(...cells.map(p => p[0]));
       const minC = Math.min(...cells.map(p => p[1])), maxC = Math.max(...cells.map(p => p[1]));
-      const x = ox + minC * cs + cs * 0.08, y = oy + minR * cs + cs * 0.08;
-      const wd = (maxC - minC + 1) * cs - cs * 0.16, ht = (maxR - minR + 1) * cs - cs * 0.16;
-      c.fillStyle = 'rgba(70,90,120,0.10)';
-      this.rrOn(c, x, y, wd, ht, cs * 0.14); c.fill();
-      c.strokeStyle = 'rgba(255,255,255,0.85)';
-      c.lineWidth = Math.max(2, cs * 0.065);
-      this.rrOn(c, x, y, wd, ht, cs * 0.14); c.stroke();
-      c.fillStyle = 'rgba(255,255,255,0.75)';
-      c.font = `900 ${Math.round(cs * 0.52)}px "Trebuchet MS", sans-serif`;
+      const x = ox + minC * cs + cs * 0.09, y = oy + minR * cs + cs * 0.09;
+      const wd = (maxC - minC + 1) * cs - cs * 0.18, ht = (maxR - minR + 1) * cs - cs * 0.18;
+      // Slightly darker pad so the bay reads as its own surface.
+      c.fillStyle = 'rgba(38,50,68,0.11)';
+      this.rrOn(c, x, y, wd, ht, cs * 0.16); c.fill();
+      // Worn paint: soft wide pass under a crisp bright pass.
+      c.strokeStyle = 'rgba(255,255,255,0.32)';
+      c.lineWidth = Math.max(4, cs * 0.11);
+      this.rrOn(c, x, y, wd, ht, cs * 0.16); c.stroke();
+      c.strokeStyle = 'rgba(255,255,255,0.92)';
+      c.lineWidth = Math.max(2, cs * 0.05);
+      this.rrOn(c, x, y, wd, ht, cs * 0.16); c.stroke();
+      // Painted P with a soft paint-shadow offset.
+      c.font = `900 ${Math.round(cs * 0.5)}px "Trebuchet MS", sans-serif`;
       c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillStyle = 'rgba(25,35,50,0.28)';
+      c.fillText('P', x + wd / 2 + cs * 0.03, y + ht / 2 + cs * 0.045);
+      c.fillStyle = 'rgba(255,255,255,0.88)';
       c.fillText('P', x + wd / 2, y + ht / 2 + 1);
+    }
+
+    // Storm drains tucked against the kerbs.
+    let grates = 0;
+    for (let tries = 0; tries < 30 && grates < 2; tries++) {
+      const r = 1 + Math.floor(rand() * (ROWS - 2));
+      const cc = rand() < 0.5 ? 1 : COLS - 2;
+      if (b.type[r][cc] !== TILE.ROAD || b.routeSet.has(r + ',' + cc) || spaceCellSet.has(r + ',' + cc)) continue;
+      const gx = ox + cc * cs + (cc === 1 ? cs * 0.12 : cs * 0.56), gy2 = oy + r * cs + cs * 0.3;
+      c.fillStyle = 'rgba(24,28,36,0.85)';
+      this.rrOn(c, gx, gy2, cs * 0.32, cs * 0.4, cs * 0.05); c.fill();
+      c.strokeStyle = 'rgba(255,255,255,0.12)'; c.lineWidth = 1;
+      for (let i = 1; i < 4; i++) {
+        c.beginPath();
+        c.moveTo(gx + (cs * 0.32 / 4) * i, gy2 + 2);
+        c.lineTo(gx + (cs * 0.32 / 4) * i, gy2 + cs * 0.4 - 2);
+        c.stroke();
+      }
+      grates++;
     }
 
     // Picket fences along the top and bottom grass strips.
@@ -1326,13 +1463,31 @@ class Renderer {
       }
     }
 
-    // Static decorations: houses, hydrants, rocks, flowers.
+    // Static decorations: houses, hydrants, mailboxes, benches, rocks, flowers.
     for (const d of g.decor) {
       const x = ox + d.x * cs, y = oy + d.y * cs, s = d.s * cs;
       if (d.kind === 'house') this.paintHouse(c, x, y, s, d.seed);
       else if (d.kind === 'hydrant') this.paintHydrant(c, x, y, s);
+      else if (d.kind === 'mailbox') this.paintMailbox(c, x, y, s);
+      else if (d.kind === 'bench') this.paintBench(c, x, y, s);
       else if (d.kind === 'rock') this.paintRock(c, x, y, s, d.seed);
       else if (d.kind === 'flower') this.paintFlower(c, x, y, s, d.seed);
+    }
+
+    // Ambient light: warm sun from the top + gentle occlusion at the edges.
+    const sun = c.createRadialGradient(ox + COLS * cs * 0.5, oy - cs, cs,
+                                       ox + COLS * cs * 0.5, oy - cs, ROWS * cs * 1.05);
+    sun.addColorStop(0, 'rgba(255,250,225,0.10)');
+    sun.addColorStop(0.4, 'rgba(255,250,225,0.035)');
+    sun.addColorStop(1, 'rgba(255,250,225,0)');
+    c.fillStyle = sun;
+    c.fillRect(0, 0, w, h);
+    for (let i = 0; i < 3; i++) {
+      c.strokeStyle = `rgba(10,18,30,${0.05 - i * 0.013})`;
+      c.lineWidth = cs * (0.18 + i * 0.16);
+      this.rrOn(c, this.stageRect.bx + c.lineWidth / 2, this.stageRect.by + c.lineWidth / 2,
+        this.stageRect.bw - c.lineWidth, this.stageRect.bh - c.lineWidth, this.stageRect.brad);
+      c.stroke();
     }
 
     c.restore();   // end stage clip
@@ -1352,41 +1507,100 @@ class Renderer {
   }
 
   paintFence(c, x, y, cs) {
-    c.fillStyle = 'rgba(20,30,45,0.10)';
-    c.fillRect(x + cs * 0.04, y + cs * 0.2, cs * 0.92, cs * 0.06);
-    c.fillStyle = '#efe4c8';
-    c.fillRect(x, y + cs * 0.08, cs, cs * 0.05);
-    c.fillRect(x, y + cs * 0.2, cs, cs * 0.05);
-    c.fillStyle = '#f7efdb';
+    c.fillStyle = 'rgba(20,30,45,0.12)';
+    c.fillRect(x + cs * 0.03, y + cs * 0.24, cs * 0.94, cs * 0.07);
+    for (const ry of [0.09, 0.21]) {
+      c.fillStyle = '#e9ddc2';
+      c.fillRect(x, y + cs * ry, cs, cs * 0.05);
+      c.fillStyle = 'rgba(120,100,60,0.25)';
+      c.fillRect(x, y + cs * (ry + 0.035), cs, cs * 0.015);
+    }
     for (let i = 0; i < 4; i++) {
-      const px = x + cs * (0.06 + i * 0.27);
-      this.rrOn(c, px, y, cs * 0.08, cs * 0.32, cs * 0.03);
-      c.fill();
+      const px = x + cs * (0.05 + i * 0.27);
+      c.fillStyle = '#f6eeda';
+      this.rrOn(c, px, y, cs * 0.09, cs * 0.32, cs * 0.03); c.fill();
+      c.fillStyle = '#d9cba6';                          // pointed post caps
+      c.beginPath();
+      c.moveTo(px, y + cs * 0.02);
+      c.lineTo(px + cs * 0.045, y - cs * 0.03);
+      c.lineTo(px + cs * 0.09, y + cs * 0.02);
+      c.closePath(); c.fill();
     }
   }
 
   paintHouse(c, x, y, s, seed) {
-    const palettes = [['#e2694f', '#c94f38'], ['#5f8fd0', '#4674b4'],
-                      ['#e8b04c', '#cc9236'], ['#7fb069', '#639152']];
-    const [roofA, roofB] = palettes[Math.floor(seed * palettes.length) % palettes.length];
+    // Proper top-down cottage: walls, two-slope gabled roof, chimney, skylight.
+    const roofs = [['#e2694f', '#b84a34'], ['#5f8fd0', '#41669e'],
+                   ['#e8b04c', '#c08a2c'], ['#7fb069', '#5d8a4b']];
+    const [ra, rb] = roofs[Math.floor(seed * roofs.length) % roofs.length];
+    const w2 = s * 0.95, h2 = s * 1.5;
     c.save();
     c.translate(x, y);
-    c.rotate((seed - 0.5) * 0.12);
+    c.fillStyle = 'rgba(18,26,40,0.22)';                       // ground shadow
+    this.rrOn(c, -w2 / 2 + s * 0.07, -h2 / 2 + s * 0.1, w2, h2, s * 0.12); c.fill();
+    c.fillStyle = '#efe6d2';                                   // walls peeking out
+    this.rrOn(c, -w2 / 2, -h2 / 2, w2, h2, s * 0.1); c.fill();
+    c.strokeStyle = 'rgba(90,80,60,0.35)'; c.lineWidth = 1;
+    this.rrOn(c, -w2 / 2, -h2 / 2, w2, h2, s * 0.1); c.stroke();
+    // Gabled roof: sun-lit and shaded slopes split along the vertical ridge.
+    const rw = w2 * 0.88, rh = h2 * 0.86, eave = s * 0.1;
+    c.fillStyle = ra;
+    c.beginPath(); c.moveTo(0, -rh / 2); c.lineTo(-rw / 2, -rh / 2 + eave);
+    c.lineTo(-rw / 2, rh / 2 - eave); c.lineTo(0, rh / 2); c.closePath(); c.fill();
+    c.fillStyle = rb;
+    c.beginPath(); c.moveTo(0, -rh / 2); c.lineTo(rw / 2, -rh / 2 + eave);
+    c.lineTo(rw / 2, rh / 2 - eave); c.lineTo(0, rh / 2); c.closePath(); c.fill();
+    c.strokeStyle = 'rgba(255,255,255,0.55)';                  // ridge highlight
+    c.lineWidth = Math.max(1, s * 0.05);
+    c.beginPath(); c.moveTo(0, -rh / 2); c.lineTo(0, rh / 2); c.stroke();
+    c.strokeStyle = 'rgba(0,0,0,0.2)'; c.lineWidth = 1;        // eave edges
+    c.beginPath();
+    c.moveTo(0, -rh / 2); c.lineTo(-rw / 2, -rh / 2 + eave);
+    c.moveTo(0, -rh / 2); c.lineTo(rw / 2, -rh / 2 + eave);
+    c.moveTo(0, rh / 2); c.lineTo(-rw / 2, rh / 2 - eave);
+    c.moveTo(0, rh / 2); c.lineTo(rw / 2, rh / 2 - eave);
+    c.stroke();
+    c.fillStyle = 'rgba(18,26,40,0.15)';                       // chimney shadow
+    this.rrOn(c, rw * 0.14 + s * 0.03, -rh * 0.26 + s * 0.03, s * 0.17, s * 0.17, s * 0.03); c.fill();
+    c.fillStyle = '#b0492f';                                   // chimney
+    this.rrOn(c, rw * 0.14, -rh * 0.26, s * 0.17, s * 0.17, s * 0.03); c.fill();
+    c.fillStyle = '#bcd6ea';                                   // skylight
+    this.rrOn(c, -rw * 0.32, rh * 0.08, s * 0.19, s * 0.14, s * 0.03); c.fill();
+    c.strokeStyle = 'rgba(0,0,0,0.2)';
+    this.rrOn(c, -rw * 0.32, rh * 0.08, s * 0.19, s * 0.14, s * 0.03); c.stroke();
+    c.restore();
+  }
+
+  paintMailbox(c, x, y, s) {
     c.fillStyle = 'rgba(20,30,45,0.18)';
-    this.rrOn(c, -s * 0.44, -s * 0.32, s, s * 0.84, s * 0.1); c.fill();
-    c.fillStyle = '#f0e6d4';
-    this.rrOn(c, -s * 0.5, -s * 0.42, s, s * 0.84, s * 0.08); c.fill();
-    const gr = c.createLinearGradient(0, -s * 0.36, 0, s * 0.36);
-    gr.addColorStop(0, roofA); gr.addColorStop(1, roofB);
-    c.fillStyle = gr;
-    this.rrOn(c, -s * 0.44, -s * 0.36, s * 0.88, s * 0.72, s * 0.07); c.fill();
-    c.strokeStyle = 'rgba(0,0,0,0.18)';
-    c.lineWidth = Math.max(1, s * 0.03);
-    this.rrOn(c, -s * 0.44, -s * 0.36, s * 0.88, s * 0.72, s * 0.07); c.stroke();
-    c.strokeStyle = 'rgba(255,255,255,0.4)';
-    c.beginPath(); c.moveTo(-s * 0.36, 0); c.lineTo(s * 0.36, 0); c.stroke();
-    c.fillStyle = '#b0492f';
-    this.rrOn(c, s * 0.12, -s * 0.28, s * 0.16, s * 0.16, s * 0.03); c.fill();
+    c.beginPath(); c.ellipse(x + s * 0.15, y + s * 0.5, s * 0.5, s * 0.22, 0, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#8a6b4a';
+    c.fillRect(x - s * 0.06, y - s * 0.05, s * 0.12, s * 0.55);
+    const bg = c.createLinearGradient(x, y - s * 0.55, x, y - s * 0.05);
+    bg.addColorStop(0, '#5f8fd0'); bg.addColorStop(1, '#3d67a8');
+    c.fillStyle = bg;
+    this.rrOn(c, x - s * 0.34, y - s * 0.55, s * 0.68, s * 0.5, s * 0.15); c.fill();
+    c.strokeStyle = 'rgba(0,0,0,0.22)'; c.lineWidth = 1;
+    this.rrOn(c, x - s * 0.34, y - s * 0.55, s * 0.68, s * 0.5, s * 0.15); c.stroke();
+    c.fillStyle = '#e8443a';                                   // little flag
+    c.fillRect(x + s * 0.28, y - s * 0.7, s * 0.09, s * 0.28);
+    c.fillStyle = 'rgba(255,255,255,0.5)';
+    this.rrOn(c, x - s * 0.27, y - s * 0.5, s * 0.3, s * 0.12, s * 0.05); c.fill();
+  }
+
+  paintBench(c, x, y, s) {
+    c.fillStyle = 'rgba(20,30,45,0.16)';
+    c.beginPath(); c.ellipse(x + s * 0.1, y + s * 0.12, s * 0.5, s * 0.75, 0, 0, Math.PI * 2); c.fill();
+    c.save();
+    c.translate(x, y);
+    c.fillStyle = '#7a5a3a';                                   // frame
+    this.rrOn(c, -s * 0.24, -s * 0.66, s * 0.48, s * 1.32, s * 0.09); c.fill();
+    c.fillStyle = '#b0855a';                                   // slats
+    for (let i = 0; i < 4; i++) {
+      this.rrOn(c, -s * 0.2, -s * 0.6 + i * s * 0.32, s * 0.4, s * 0.22, s * 0.05); c.fill();
+    }
+    c.strokeStyle = 'rgba(0,0,0,0.2)'; c.lineWidth = 1;
+    this.rrOn(c, -s * 0.24, -s * 0.66, s * 0.48, s * 1.32, s * 0.09); c.stroke();
     c.restore();
   }
 
@@ -1670,12 +1884,8 @@ class Renderer {
   drawVehicleBody(veh, pose, { selected = false, hinted = false, movable = true, ghost = false, t = 0 } = {}) {
     const ctx = this.ctx, { cs } = this.view;
     const horiz = Math.abs(pose.angle) < 0.01;
-    const L = veh.len * cs - cs * 0.18;   // length along the local +x (front)
-    const W = cs * 0.82;                  // width across local y
+    const { L, W, rad } = this.carGeom(veh);
     const sw = horiz ? L : W, sh = horiz ? W : L;   // screen-space footprint (axis-aligned)
-    const rad = cs * 0.27;
-    const seed = [...String(veh.id)].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) >>> 0, 7);
-    const variant = seed % 3;             // small per-car styling variety
 
     let scale = 1;
     if (selected) scale = 1.05;
@@ -1706,16 +1916,20 @@ class Renderer {
       ctx.fillStyle = side;
       this.rr(-sw / 2, -sh / 2 - lift + depth * 0.15, sw, sh + depth * 0.9, rad);
       ctx.fill();
-      // wheel nubs poking out along the two long sides
-      ctx.fillStyle = '#20262f';
+      // Chunky rubber tires with a lighter hub, poking out along the two
+      // long sides. Trucks get a doubled rear axle.
       const along = horiz ? sw : sh;
-      const positions = [-along * 0.3, along * 0.3];
-      for (const p of positions) {
+      const axles = veh.len >= 4 ? [-0.35, -0.22, 0.31] : [-0.29, 0.29];
+      for (const a of axles) {
         for (const s of [-1, 1]) {
-          const wx = horiz ? p : s * (sw / 2);
-          const wy = horiz ? s * (sh / 2) : p;
-          const ww = horiz ? cs * 0.2 : cs * 0.1, wh = horiz ? cs * 0.1 : cs * 0.2;
-          this.rr(wx - ww / 2, wy - wh / 2 - lift + depth * 0.5, ww, wh, cs * 0.05);
+          const wx = horiz ? a * along : s * (sw / 2);
+          const wy = horiz ? s * (sh / 2) : a * along;
+          const ww = horiz ? cs * 0.23 : cs * 0.13, wh = horiz ? cs * 0.13 : cs * 0.23;
+          ctx.fillStyle = '#171d25';
+          this.rr(wx - ww / 2, wy - wh / 2 - lift + depth * 0.5, ww, wh, cs * 0.055);
+          ctx.fill();
+          ctx.fillStyle = '#3d4854';
+          this.rr(wx - ww * 0.26, wy - wh * 0.26 - lift + depth * 0.5, ww * 0.52, wh * 0.52, cs * 0.04);
           ctx.fill();
         }
       }
@@ -1736,72 +1950,10 @@ class Renderer {
       ctx.shadowBlur = cs * 0.2;
     }
 
-    // Glossy top-lit candy body.
-    const grad = ctx.createLinearGradient(0, -W / 2, 0, W / 2);
-    grad.addColorStop(0, this.lighten(veh.color, 0.5));
-    grad.addColorStop(0.42, this.lighten(veh.color, 0.12));
-    grad.addColorStop(1, this.lighten(veh.color, -0.14));
-    ctx.fillStyle = grad;
-    this.rr(-L / 2, -W / 2, L, W, rad); ctx.fill();
+    // The detailed body is a cached sprite — one drawImage per car per frame.
+    const spr = this.carSprite(veh);
+    ctx.drawImage(spr.cv, -spr.w / 2, -spr.h / 2, spr.w, spr.h);
     ctx.shadowBlur = 0;
-    ctx.lineWidth = Math.max(1.5, cs * 0.05);
-    ctx.strokeStyle = this.lighten(veh.color, -0.4);
-    this.rr(-L / 2, -W / 2, L, W, rad); ctx.stroke();
-
-    if (ghost) ctx.globalAlpha *= 1;   // (ghost alpha applied by caller)
-
-    // Tinted glass with a bright reflection sweep.
-    const glassFill = (x, y, gw, gh, gr) => {
-      const gg = ctx.createLinearGradient(x, y, x + gw, y + gh);
-      gg.addColorStop(0, '#4a6486');
-      gg.addColorStop(1, '#1d2c3f');
-      ctx.fillStyle = gg;
-      this.rr(x, y, gw, gh, gr); ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,0.4)';
-      this.rr(x + gw * 0.12, y + gh * 0.12, gw * 0.34, gh * 0.28, gr * 0.6); ctx.fill();
-    };
-
-    const kind = veh.len >= 4 ? 'truck' : veh.kind === 'van' || veh.len === 3 ? 'van' : 'car';
-    if (kind === 'truck') {
-      // Cab up front + long ribbed container.
-      ctx.fillStyle = this.lighten(veh.color, 0.24);
-      this.rr(-L * 0.5, -W * 0.4, L * 0.66, W * 0.8, rad * 0.5); ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = cs * 0.03;
-      for (let i = 1; i < 5; i++) { const x = -L * 0.44 + i * L * 0.12; ctx.beginPath(); ctx.moveTo(x, -W * 0.32); ctx.lineTo(x, W * 0.32); ctx.stroke(); }
-      ctx.fillStyle = this.lighten(veh.color, -0.1);
-      this.rr(L * 0.18, -W * 0.42, L * 0.14, W * 0.84, rad * 0.4); ctx.fill();   // cab roof
-      glassFill(L * 0.3, -W * 0.34, L * 0.1, W * 0.68, cs * 0.06);
-    } else if (kind === 'van') {
-      ctx.fillStyle = this.lighten(veh.color, 0.26);
-      this.rr(-L * 0.46, -W * 0.4, L * 0.62, W * 0.8, rad * 0.5); ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,0.1)'; ctx.lineWidth = cs * 0.03;
-      for (let i = 0; i < 3; i++) { const x = -L * 0.36 + i * L * 0.16; ctx.beginPath(); ctx.moveTo(x, -W * 0.3); ctx.lineTo(x, W * 0.3); ctx.stroke(); }
-      glassFill(L * 0.2, -W * 0.34, L * 0.16, W * 0.68, cs * 0.07);
-    } else {
-      const cab = L * (variant === 0 ? 0.48 : 0.54);
-      ctx.fillStyle = this.lighten(veh.color, 0.26);
-      this.rr(-cab / 2, -W * 0.38, cab, W * 0.76, rad * 0.62); ctx.fill();
-      glassFill(cab / 2 - L * 0.14, -W * 0.32, L * 0.115, W * 0.64, cs * 0.07);   // windshield
-      glassFill(-cab / 2 + L * 0.02, -W * 0.32, L * 0.09, W * 0.64, cs * 0.07);   // rear glass
-      // roof detail varies per car (sunroof / centre stripe / plain)
-      if (variant === 1) { ctx.fillStyle = '#26374a'; this.rr(-cab * 0.16, -W * 0.24, cab * 0.32, W * 0.48, cs * 0.05); ctx.fill(); }
-      else if (variant === 2) { ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.fillRect(-cab * 0.28, -W * 0.06, cab * 0.56, W * 0.12); }
-      ctx.fillStyle = '#2b3d52';
-      this.rr(-cab * 0.2, -W * 0.38, cab * 0.4, W * 0.09, cs * 0.03); ctx.fill();
-      this.rr(-cab * 0.2, W * 0.29, cab * 0.4, W * 0.09, cs * 0.03); ctx.fill();
-    }
-
-    // Long glossy highlight streak.
-    ctx.fillStyle = 'rgba(255,255,255,0.26)';
-    this.rr(-L / 2 + cs * 0.1, -W / 2 + cs * 0.05, L - cs * 0.45, W * 0.17, rad * 0.5); ctx.fill();
-
-    // Headlights (front = +x) + taillights.
-    ctx.fillStyle = '#fff6d0';
-    this.rr(L / 2 - cs * 0.11, -W * 0.36, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
-    this.rr(L / 2 - cs * 0.11, W * 0.16, cs * 0.08, W * 0.2, cs * 0.03); ctx.fill();
-    ctx.fillStyle = '#ff6459';
-    this.rr(-L / 2 + cs * 0.03, -W * 0.34, cs * 0.055, W * 0.18, cs * 0.02); ctx.fill();
-    this.rr(-L / 2 + cs * 0.03, W * 0.16, cs * 0.055, W * 0.18, cs * 0.02); ctx.fill();
 
     // Blocked traffic reads darker so movable cars pop.
     if (!movable && !ghost && !selected) {
@@ -1826,6 +1978,189 @@ class Renderer {
     }
 
     ctx.restore();
+  }
+
+  /* Per-car cosmetic geometry. Style follows size with per-id variety: small
+     cars come as sedans, hatchbacks or compacts; length-3 vehicles as vans or
+     pickups; length-4 vehicles are box trucks. Footprint/logic unchanged. */
+  carGeom(veh) {
+    const { cs } = this.view;
+    const seed = [...String(veh.id)].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) >>> 0, 7);
+    const rnd = n => ((seed >>> (n * 3)) % 97) / 97;  // deterministic per-car 0..1
+    const style = veh.len >= 4 ? 'truck'
+      : veh.len === 3 ? (seed % 3 === 0 ? 'pickup' : 'van')
+        : ['sedan', 'hatch', 'mini'][seed % 3];
+    const L = veh.len * cs - cs * (style === 'mini' ? 0.3 : style === 'truck' ? 0.14 : 0.18 + rnd(1) * 0.05);
+    const W = cs * (style === 'mini' ? 0.72 : style === 'van' || style === 'truck' ? 0.86 : 0.78 + rnd(2) * 0.04);
+    return { seed, style, L, W, rad: cs * 0.27 };
+  }
+
+  /* The detailed top face is painted once into an offscreen sprite per car
+     (cache cleared on resize), so the per-frame cost is one drawImage. */
+  carSprite(veh) {
+    const key = `${veh.id}|${veh.color}|${veh.len}`;
+    let s = this.carSprites.get(key);
+    if (s) return s;
+    if (this.carSprites.size > 96) this.carSprites.clear();
+    const { cs } = this.view;
+    const geom = this.carGeom(veh);
+    const pad = cs * 0.14;   // room for mirrors + the body outline stroke
+    const w = geom.L + pad * 2, h = geom.W + pad * 2;
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.ceil(w * this.dpr));
+    cv.height = Math.max(1, Math.ceil(h * this.dpr));
+    const c = cv.getContext('2d');
+    c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    c.translate(w / 2, h / 2);
+    this.paintCarTop(c, veh, geom);
+    s = { cv, w, h };
+    this.carSprites.set(key, s);
+    return s;
+  }
+
+  /* Paints a car's top face centered at the origin, nose pointing +x. */
+  paintCarTop(c, veh, { seed, style, L, W, rad }) {
+    const { cs } = this.view;
+
+    // Glossy top-lit candy paint over the whole silhouette.
+    const grad = c.createLinearGradient(0, -W / 2, 0, W / 2);
+    grad.addColorStop(0, this.lighten(veh.color, 0.5));
+    grad.addColorStop(0.42, this.lighten(veh.color, 0.12));
+    grad.addColorStop(1, this.lighten(veh.color, -0.16));
+    c.fillStyle = grad;
+    this.rrOn(c, -L / 2, -W / 2, L, W, rad); c.fill();
+    c.lineWidth = Math.max(1.5, cs * 0.05);
+    c.strokeStyle = this.lighten(veh.color, -0.42);
+    this.rrOn(c, -L / 2, -W / 2, L, W, rad); c.stroke();
+
+    // Moulded bumper caps at both ends.
+    c.fillStyle = this.lighten(veh.color, -0.34);
+    this.rrOn(c, L / 2 - cs * 0.12, -W * 0.34, cs * 0.09, W * 0.68, cs * 0.045); c.fill();
+    this.rrOn(c, -L / 2 + cs * 0.03, -W * 0.34, cs * 0.09, W * 0.68, cs * 0.045); c.fill();
+
+    // Long hood/flank shine, painted under the glass so windows stay deep.
+    c.fillStyle = 'rgba(255,255,255,0.24)';
+    this.rrOn(c, -L / 2 + cs * 0.1, -W / 2 + cs * 0.05, L - cs * 0.45, W * 0.16, rad * 0.5); c.fill();
+
+    // Deep tinted glass with a soft sky gradient.
+    const glass = (x, y, gw, gh, gr) => {
+      const gg = c.createLinearGradient(x, y, x + gw * 0.35, y + gh);
+      gg.addColorStop(0, '#61809f');
+      gg.addColorStop(0.5, '#31455e');
+      gg.addColorStop(1, '#1a293c');
+      c.fillStyle = gg;
+      this.rrOn(c, x, y, gw, gh, gr); c.fill();
+    };
+    // A full greenhouse: one glass canopy with the roof panel floating on
+    // top, so windshield, rear window and side windows all read from above.
+    const canopy = (x0, x1, fFrac, rFrac) => {
+      const gw = x1 - x0;
+      glass(x0, -W * 0.4, gw, W * 0.8, cs * 0.12);
+      const rx = x0 + gw * rFrac, rw = gw * (1 - fFrac - rFrac);
+      const rg = c.createLinearGradient(0, -W * 0.3, 0, W * 0.3);
+      rg.addColorStop(0, this.lighten(veh.color, 0.36));
+      rg.addColorStop(1, this.lighten(veh.color, -0.02));
+      c.fillStyle = rg;
+      this.rrOn(c, rx, -W * 0.28, rw, W * 0.56, cs * 0.1); c.fill();
+      c.lineWidth = Math.max(1, cs * 0.025);
+      c.strokeStyle = 'rgba(12,20,32,0.28)';
+      this.rrOn(c, rx, -W * 0.28, rw, W * 0.56, cs * 0.1); c.stroke();
+      c.fillStyle = 'rgba(255,255,255,0.34)';   // windshield reflection sweep
+      this.rrOn(c, x1 - gw * fFrac * 0.82, -W * 0.33, gw * fFrac * 0.5, W * 0.3, cs * 0.05); c.fill();
+      return { rx, rw };
+    };
+    // Small door mirrors at the A-pillar.
+    const mirrors = mx => {
+      c.fillStyle = this.lighten(veh.color, -0.22);
+      this.rrOn(c, mx - cs * 0.045, -W / 2 - cs * 0.05, cs * 0.1, cs * 0.075, cs * 0.03); c.fill();
+      this.rrOn(c, mx - cs * 0.045, W / 2 - cs * 0.025, cs * 0.1, cs * 0.075, cs * 0.03); c.fill();
+    };
+
+    if (style === 'truck') {
+      // Ribbed cargo box behind a short cab.
+      const boxR = L * 0.14;
+      const bg = c.createLinearGradient(0, -W / 2, 0, W / 2);
+      bg.addColorStop(0, this.lighten(veh.color, 0.44));
+      bg.addColorStop(1, this.lighten(veh.color, -0.06));
+      c.fillStyle = bg;
+      this.rrOn(c, -L / 2 + cs * 0.05, -W * 0.44, boxR + L / 2 - cs * 0.05, W * 0.88, cs * 0.08); c.fill();
+      c.lineWidth = Math.max(1, cs * 0.035);
+      c.strokeStyle = this.lighten(veh.color, -0.4);
+      this.rrOn(c, -L / 2 + cs * 0.05, -W * 0.44, boxR + L / 2 - cs * 0.05, W * 0.88, cs * 0.08); c.stroke();
+      c.strokeStyle = 'rgba(0,0,0,0.13)'; c.lineWidth = cs * 0.03;
+      for (let i = 1; i <= 6; i++) {
+        const x = -L / 2 + cs * 0.05 + (i * (boxR + L / 2 - cs * 0.05)) / 7;
+        c.beginPath(); c.moveTo(x, -W * 0.4); c.lineTo(x, W * 0.4); c.stroke();
+      }
+      c.fillStyle = 'rgba(10,16,26,0.35)';                       // cab/box gap
+      c.fillRect(boxR + cs * 0.01, -W * 0.42, cs * 0.045, W * 0.84);
+      canopy(boxR + cs * 0.1, L / 2 - cs * 0.1, 0.42, 0.14);
+      mirrors(L / 2 - cs * 0.16);
+    } else if (style === 'van') {
+      // One long roof with rack ribs, windshield right at the nose.
+      const { rx, rw } = canopy(-L * 0.42, L * 0.38, 0.2, 0.09);
+      c.strokeStyle = 'rgba(0,0,0,0.12)'; c.lineWidth = cs * 0.03;
+      for (let i = 1; i <= 4; i++) {
+        const x = rx + (i * rw) / 5;
+        c.beginPath(); c.moveTo(x, -W * 0.24); c.lineTo(x, W * 0.24); c.stroke();
+      }
+      mirrors(L * 0.4);
+    } else if (style === 'pickup') {
+      // Cab up front, open cargo bed with slats behind.
+      canopy(-L * 0.06, L * 0.32, 0.38, 0.16);
+      c.fillStyle = this.lighten(veh.color, -0.38);
+      this.rrOn(c, -L * 0.46, -W * 0.38, L * 0.36, W * 0.76, cs * 0.07); c.fill();
+      c.fillStyle = this.lighten(veh.color, -0.52);
+      this.rrOn(c, -L * 0.44, -W * 0.33, L * 0.32, W * 0.66, cs * 0.05); c.fill();
+      c.strokeStyle = 'rgba(255,255,255,0.08)'; c.lineWidth = cs * 0.025;
+      for (let i = 1; i <= 3; i++) {
+        const x = -L * 0.44 + (i * L * 0.32) / 4;
+        c.beginPath(); c.moveTo(x, -W * 0.31); c.lineTo(x, W * 0.31); c.stroke();
+      }
+      mirrors(L * 0.34);
+    } else if (style === 'hatch') {
+      // Roof pushed back with a big rear window right at the tail.
+      const { rx } = canopy(-L * 0.4, L * 0.24, 0.3, 0.24);
+      c.strokeStyle = 'rgba(0,0,0,0.1)'; c.lineWidth = Math.max(1, cs * 0.028);
+      for (const sy of [-1, 1]) {   // long bonnet creases
+        c.beginPath(); c.moveTo(L * 0.3, sy * W * 0.2); c.lineTo(L / 2 - cs * 0.14, sy * W * 0.15); c.stroke();
+      }
+      c.fillStyle = 'rgba(12,20,32,0.3)';   // roof rails
+      this.rrOn(c, rx + cs * 0.02, -W * 0.27, L * 0.28, cs * 0.035, cs * 0.02); c.fill();
+      this.rrOn(c, rx + cs * 0.02, W * 0.27 - cs * 0.035, L * 0.28, cs * 0.035, cs * 0.02); c.fill();
+      mirrors(L * 0.26);
+    } else {
+      // Sedan / compact: balanced greenhouse, bonnet + boot creases, and an
+      // optional sunroof or twin racing stripes per car.
+      const x0 = style === 'mini' ? -L * 0.34 : -L * 0.26;
+      const x1 = style === 'mini' ? L * 0.34 : L * 0.28;
+      const { rx, rw } = canopy(x0, x1, 0.3, style === 'mini' ? 0.28 : 0.22);
+      c.strokeStyle = 'rgba(0,0,0,0.1)'; c.lineWidth = Math.max(1, cs * 0.028);
+      for (const sy of [-1, 1]) {
+        c.beginPath(); c.moveTo(x1 + cs * 0.08, sy * W * 0.2); c.lineTo(L / 2 - cs * 0.14, sy * W * 0.16); c.stroke();
+        c.beginPath(); c.moveTo(x0 - cs * 0.08, sy * W * 0.2); c.lineTo(-L / 2 + cs * 0.14, sy * W * 0.16); c.stroke();
+      }
+      if (seed % 5 === 0) {         // sunroof
+        c.fillStyle = 'rgba(16,26,40,0.85)';
+        this.rrOn(c, rx + rw * 0.28, -W * 0.16, rw * 0.44, W * 0.32, cs * 0.05); c.fill();
+      } else if (seed % 5 === 1) {  // twin racing stripes over the bonnet
+        c.fillStyle = 'rgba(255,255,255,0.4)';
+        c.fillRect(x1 + cs * 0.06, -W * 0.13, L / 2 - x1 - cs * 0.14, W * 0.09);
+        c.fillRect(x1 + cs * 0.06, W * 0.04, L / 2 - x1 - cs * 0.14, W * 0.09);
+      }
+      mirrors(x1 + cs * 0.02);
+    }
+
+    // Headlights with a lit inner lens (front = +x), red tail-lights.
+    c.fillStyle = '#fff3c4';
+    this.rrOn(c, L / 2 - cs * 0.12, -W * 0.36, cs * 0.09, W * 0.2, cs * 0.035); c.fill();
+    this.rrOn(c, L / 2 - cs * 0.12, W * 0.16, cs * 0.09, W * 0.2, cs * 0.035); c.fill();
+    c.fillStyle = 'rgba(255,255,255,0.85)';
+    this.rrOn(c, L / 2 - cs * 0.105, -W * 0.33, cs * 0.035, W * 0.1, cs * 0.02); c.fill();
+    this.rrOn(c, L / 2 - cs * 0.105, W * 0.19, cs * 0.035, W * 0.1, cs * 0.02); c.fill();
+    c.fillStyle = '#ff5a4e';
+    this.rrOn(c, -L / 2 + cs * 0.035, -W * 0.34, cs * 0.055, W * 0.18, cs * 0.02); c.fill();
+    this.rrOn(c, -L / 2 + cs * 0.035, W * 0.16, cs * 0.055, W * 0.18, cs * 0.02); c.fill();
   }
 
   drawAmbulance(t) {
@@ -1867,11 +2202,14 @@ class Renderer {
     side.addColorStop(1, '#93a0ad');
     ctx.fillStyle = side;
     this.rr(-sw / 2, -sh / 2 + depth * 0.15, sw, sh + depth * 0.9, cs * 0.22); ctx.fill();
-    // Wheels.
-    ctx.fillStyle = '#20262f';
+    // Wheels — chunky tires with bright hubs, matching the civilian cars.
     for (const p of [-sh * 0.3, sh * 0.3]) {
       for (const s of [-1, 1]) {
-        this.rr(s * (sw / 2) - cs * 0.05, p - cs * 0.1 + depth * 0.5, cs * 0.1, cs * 0.2, cs * 0.05);
+        ctx.fillStyle = '#171d25';
+        this.rr(s * (sw / 2) - cs * 0.065, p - cs * 0.115 + depth * 0.5, cs * 0.13, cs * 0.23, cs * 0.055);
+        ctx.fill();
+        ctx.fillStyle = '#3d4854';
+        this.rr(s * (sw / 2) - cs * 0.034, p - cs * 0.06 + depth * 0.5, cs * 0.068, cs * 0.12, cs * 0.04);
         ctx.fill();
       }
     }
@@ -1906,6 +2244,12 @@ class Renderer {
     const cw = W * 0.36, ct2 = W * 0.12, ccx = -L * 0.15;
     this.rr(ccx - cw / 2, -ct2 / 2, cw, ct2, ct2 * 0.3); ctx.fill();
     this.rr(ccx - ct2 / 2, -cw / 2, ct2, cw, ct2 * 0.3); ctx.fill();
+
+    // Rear twin-door seam behind the roof module, and a moulded front bumper.
+    ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.lineWidth = Math.max(1, cs * 0.03);
+    ctx.beginPath(); ctx.moveTo(-L / 2 + cs * 0.06, 0); ctx.lineTo(-L * 0.44, 0); ctx.stroke();
+    ctx.fillStyle = '#c9d2db';
+    this.rr(L / 2 - cs * 0.08, -W * 0.4, cs * 0.055, W * 0.8, cs * 0.03); ctx.fill();
 
     // Glossy body highlight.
     ctx.fillStyle = 'rgba(255,255,255,0.4)';
@@ -2360,9 +2704,13 @@ class Game {
           this.decor.push({ kind: 'bush', x: c + jx(), y: r + jx(), s: 0.16 + rand() * 0.08, seed: rand() });
         } else if (roll < 0.52 && nearRoad(r, c) && r > 0 && r < ROWS - 1) {
           this.decor.push({ kind: 'hydrant', x: c + 0.5, y: r + 0.5, s: 0.3, seed: rand() });
-        } else if (roll < 0.6) {
+        } else if (roll < 0.57 && nearRoad(r, c) && r > 0 && r < ROWS - 1) {
+          this.decor.push({ kind: 'mailbox', x: c + 0.5, y: r + 0.5, s: 0.3, seed: rand() });
+        } else if (roll < 0.62 && nearRoad(r, c) && r > 0 && r < ROWS - 1) {
+          this.decor.push({ kind: 'bench', x: c + 0.5, y: r + 0.55, s: 0.42, seed: rand() });
+        } else if (roll < 0.66) {
           this.decor.push({ kind: 'rock', x: c + jx(), y: r + jx(), s: 0.14 + rand() * 0.08, seed: rand() });
-        } else if (roll < 0.74) {
+        } else if (roll < 0.8) {
           this.decor.push({ kind: 'flower', x: c + jx(), y: r + jx(), s: 0.16, seed: rand() });
         }
       }
